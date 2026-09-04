@@ -7,6 +7,7 @@ dependencies = [
     "numpy",
     "faiss-cpu",
     "sentence-transformers",
+    "datasets",
 ]
 
 [tool.pytest.ini_options]
