@@ -3,6 +3,11 @@ name = "hybridsearch-bench"
 version = "0.1.0"
 description = "A reproducible benchmark for sparse, dense, hybrid retrieval, and reranking."
 requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "faiss-cpu",
+    "sentence-transformers",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
