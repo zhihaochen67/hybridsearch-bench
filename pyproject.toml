@@ -8,6 +8,7 @@ dependencies = [
     "faiss-cpu",
     "sentence-transformers",
     "datasets",
+    "matplotlib",
 ]
 
 [tool.pytest.ini_options]
