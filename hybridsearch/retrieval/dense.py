@@ -27,6 +27,12 @@ from __future__ import annotations
 
 import numpy as np
 
+from hybridsearch.retrieval.vector_index import (
+    build_faiss_index,
+    search_faiss_index,
+    validate_index_type,
+)
+
 
 def l2_normalize(vectors: np.ndarray) -> np.ndarray:
     """L2-normalize ``vectors`` along the last axis.
@@ -54,11 +60,21 @@ class DenseRetriever:
         Optional encoder object with an ``encode(list_of_texts)`` method
         returning an ``(n_texts, dim)`` array. When provided, ``model_name``
         is only kept as metadata and no model is downloaded.
+    index_type:
+        FAISS index type: ``"flat"`` (default — exact inner-product
+        search), ``"hnsw"``, or ``"ivf"``. See
+        :mod:`hybridsearch.retrieval.vector_index`.
+    index_params:
+        Optional configuration dict for the index type (e.g. HNSW
+        ``{"M": 32, "efConstruction": 200, "efSearch": 64}`` or IVF
+        ``{"nlist": 512, "nprobe": 32}``). Unset keys take project
+        defaults; invalid values raise ``ValueError``.
     """
 
     DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
-    def __init__(self, corpus, model_name=None, encoder=None):
+    def __init__(self, corpus, model_name=None, encoder=None,
+                 index_type="flat", index_params=None):
         self.corpus = list(corpus)
         if not self.corpus:
             raise ValueError("corpus must contain at least one document")
@@ -66,6 +82,9 @@ class DenseRetriever:
         self.model_name = model_name or self.DEFAULT_MODEL_NAME
         self.doc_ids = [document["id"] for document in self.corpus]
         self.texts = {document["id"]: document["text"] for document in self.corpus}
+
+        self.index_type = validate_index_type(index_type)
+        self.index_params = dict(index_params) if index_params else None
 
         self._encoder = encoder
         self._build_index()
@@ -85,14 +104,33 @@ class DenseRetriever:
 
     def _build_index(self):
         """Encode the corpus once, normalize, and build the FAISS index."""
-        import faiss
-
         corpus_texts = [document["text"] for document in self.corpus]
         self.document_embeddings = l2_normalize(self.encode(corpus_texts))
 
-        dimension = self.document_embeddings.shape[1]
-        self.index = faiss.IndexFlatIP(dimension)
-        self.index.add(self.document_embeddings.astype(np.float32))
+        self.index_info = build_faiss_index(
+            self.document_embeddings,
+            index_type=self.index_type,
+            params=self.index_params,
+        )
+        self.index = self.index_info.index
+
+    def rebuild_index(self, index_type=None, index_params=None):
+        """Rebuild the FAISS index from the already-encoded corpus embeddings.
+
+        The corpus is never re-encoded: this only reconstructs the index
+        over ``self.document_embeddings``, which is useful when an
+        experiment wants to switch index types (or parameters) without
+        paying for another encoder pass.
+        """
+        if index_type is not None:
+            self.index_type = validate_index_type(index_type)
+            self.index_params = dict(index_params) if index_params else None
+        self.index_info = build_faiss_index(
+            self.document_embeddings,
+            index_type=self.index_type,
+            params=self.index_params,
+        )
+        self.index = self.index_info.index
 
     def search(self, query: str, top_k: int = 10):
         """Return the top ``top_k`` documents by descending cosine similarity."""
@@ -105,8 +143,8 @@ class DenseRetriever:
 
         query_embedding = l2_normalize(self.encode([query]))[0]
 
-        scores, indices = self.index.search(
-            query_embedding.astype(np.float32)[None, :], top_k
+        scores, indices = search_faiss_index(
+            self.index_info, query_embedding, top_k
         )
 
         results = [
@@ -116,6 +154,7 @@ class DenseRetriever:
                 "score": float(score),
             }
             for score, index in zip(scores[0], indices[0])
+            if int(index) >= 0
         ]
 
         # FAISS does not guarantee tie ordering, so break ties on document id
