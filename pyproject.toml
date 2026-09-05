@@ -1,8 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "hybridsearch-bench"
 version = "0.1.0"
-description = "A reproducible benchmark for sparse, dense, hybrid retrieval, and reranking."
+description = "A reproducible benchmark comparing sparse (BM25), dense (FAISS), hybrid retrieval, and neural cross-encoder reranking on SciFact."
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Zhihao Chen", email = "2212448547@qq.com" },
+]
+keywords = [
+    "information-retrieval",
+    "benchmark",
+    "bm25",
+    "dense-retrieval",
+    "hybrid-search",
+    "reranking",
+    "faiss",
+    "scifact",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
     "numpy",
     "faiss-cpu",
@@ -10,6 +37,9 @@ dependencies = [
     "datasets",
     "matplotlib",
 ]
+
+[tool.setuptools.packages.find]
+include = ["hybridsearch*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
