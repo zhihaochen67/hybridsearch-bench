@@ -1,13 +1,24 @@
-"""Quality vs latency study of reranker candidate size on SciFact.
+"""Quality vs latency study of reranker candidate size, per dataset.
 
-    python experiments/quality_latency.py --max-queries 20 \
-        --k 10 --candidate-sizes 20,50,100
+    python experiments/quality_latency.py --dataset scifact \
+        --max-queries 20 --k 10 --candidate-sizes 20,50,100
+    python experiments/quality_latency.py --dataset fiqa \
+        --k 10 --candidate-sizes 20
 
-Compares, over the same SciFact queries:
+Compares, over the same queries of the selected dataset:
 
 - BM25, Dense, Hybrid Weighted (retrieval-only, top-10)
 - Hybrid Weighted + rerank@{20,50,100} (hybrid top-N candidates reranked
   down to the final top-10)
+
+The hybrid fusion candidate pool (``--hybrid-candidate-k``, default 50 —
+the project standard) and the reranker pools (``--candidate-sizes``) are
+independent: ``rerank@N`` takes the hybrid's top-N out of a pool-50
+fusion. This decoupled setup is the canonical reranker comparison
+configuration. Note the difference from ``experiments/reranker_benchmark.py``,
+where ``--candidate-k`` couples the two pools into a single knob — the
+two scripts therefore legitimately report slightly different numbers for
+the "same" rerank@20 because the fused candidate order differs.
 
 Quality metrics come from the final reranked ids; query-time latency is
 the wall time of the complete per-query call (hybrid candidate retrieval +
@@ -18,9 +29,13 @@ cross-encoder — and reused for every query and every candidate size.
 Warmup queries run untimed per method; one timed pass per method is
 recorded (samples = number of queries).
 
-Smoke runs save to ``outputs/scifact_quality_latency_smokeN.json``; the
-full run saves to ``outputs/scifact_quality_latency.json`` and generates
-the trade-off plots under ``assets/figures/``.
+Smoke/subset runs save to
+``outputs/<dataset>_quality_latency_smokeN.json``; the full run saves to
+``outputs/<dataset>_quality_latency.json`` and generates the trade-off
+plots under ``assets/figures/``. SciFact keeps its historical figure
+names; other datasets get a dataset prefix so figures never overwrite
+each other. Note: a ``--max-queries`` run is a deterministic subset —
+its numbers are not comparable to full-run numbers as if both were full.
 """
 
 from __future__ import annotations
@@ -37,7 +52,8 @@ if __package__ in (None, ""):
 
 from experiments.benchmark import save_results, select_query_ids
 from experiments.latency_benchmark import summarize_latencies
-from hybridsearch.data.scifact import SciFactDataset, load_scifact
+from hybridsearch.data.common import Dataset
+from hybridsearch.data.registry import DATASET_NAMES, load_dataset_by_name
 from hybridsearch.evaluation.metrics import evaluate_query, mean_metrics
 from hybridsearch.ranking.reranker import CrossEncoderReranker
 from hybridsearch.retrieval.bm25 import BM25
@@ -135,7 +151,7 @@ def run_method(search_fn, query_ids, query_texts, qrels, k: int,
 
 
 def run_quality_latency(
-    dataset: SciFactDataset,
+    dataset: Dataset,
     k: int = 10,
     candidate_sizes=None,
     alpha: float = 0.5,
@@ -202,11 +218,11 @@ def run_quality_latency(
     }
 
 
-def output_path_for(max_queries: int | None) -> str:
-    """JSON path that keeps smoke and full runs from overwriting each other."""
+def output_path_for(max_queries: int | None, dataset_name: str = "scifact") -> str:
+    """Dataset-specific JSON path that keeps smoke and full runs separate."""
     if max_queries is not None:
-        return f"outputs/scifact_quality_latency_smoke{max_queries}.json"
-    return "outputs/scifact_quality_latency.json"
+        return f"outputs/{dataset_name}_quality_latency_smoke{max_queries}.json"
+    return f"outputs/{dataset_name}_quality_latency.json"
 
 
 def format_quality_latency_table(payload: dict) -> str:
@@ -261,6 +277,13 @@ def rerank_points(payload: dict):
     return [size for size, _ in points], [entry for _, entry in points]
 
 
+def _figure_filename(dataset_name: str, filename: str) -> str:
+    """Dataset-scoped figure name; SciFact keeps its historical names."""
+    if dataset_name == "scifact":
+        return filename
+    return f"{dataset_name}_{filename}"
+
+
 def plot_quality_latency_ndcg(payload: dict, output_dir="assets/figures"):
     """Scatter every method at (mean latency, nDCG@k) with labels."""
     import matplotlib
@@ -268,6 +291,7 @@ def plot_quality_latency_ndcg(payload: dict, output_dir="assets/figures"):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    dataset_name = payload["metadata"]["dataset"]
     k = payload["metadata"]["k"]
     names = list(payload["results"])
     xs = [payload["results"][name]["latency"]["mean_ms"] for name in names]
@@ -280,11 +304,11 @@ def plot_quality_latency_ndcg(payload: dict, output_dir="assets/figures"):
                     fontsize=8)
     ax.set_xlabel("Mean query latency (ms)")
     ax.set_ylabel(f"nDCG@{k}")
-    ax.set_title("SciFact: quality vs latency")
+    ax.set_title(f"{dataset_name}: quality vs latency")
     ax.grid(True, linestyle=":", linewidth=0.5)
     fig.tight_layout()
 
-    path = Path(output_dir) / "quality_latency_ndcg.png"
+    path = Path(output_dir) / _figure_filename(dataset_name, "quality_latency_ndcg.png")
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -298,6 +322,7 @@ def plot_reranker_candidate_tradeoff(payload: dict, output_dir="assets/figures")
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    dataset_name = payload["metadata"]["dataset"]
     k = payload["metadata"]["k"]
     sizes, entries = rerank_points(payload)
     ndcg = [entry["quality"][f"ndcg@{k}"] for entry in entries]
@@ -318,10 +343,12 @@ def plot_reranker_candidate_tradeoff(payload: dict, output_dir="assets/figures")
     latency_ax.set_ylabel("Mean latency (ms)", color="tab:red")
 
     ax.legend(handles=[ndcg_line, latency_line], loc="center right")
-    ax.set_title("SciFact: reranker candidate size trade-off")
+    ax.set_title(f"{dataset_name}: reranker candidate size trade-off")
     fig.tight_layout()
 
-    path = Path(output_dir) / "reranker_candidate_tradeoff.png"
+    path = Path(output_dir) / _figure_filename(
+        dataset_name, "reranker_candidate_tradeoff.png"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -338,7 +365,9 @@ def plot_all(payload: dict, output_dir="assets/figures") -> list:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="scifact", choices=["scifact"])
+    parser.add_argument(
+        "--dataset", default="scifact", choices=list(DATASET_NAMES)
+    )
     parser.add_argument("--k", type=int, default=10, help="final evaluation cutoff")
     parser.add_argument(
         "--candidate-sizes",
@@ -371,7 +400,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--max-queries",
         type=int,
         default=None,
-        help="evaluate only the first N queries (smoke tests)",
+        help="evaluate only the first N queries (smoke/subset runs)",
     )
     parser.add_argument(
         "--warmup",
@@ -401,7 +430,7 @@ def main(argv=None) -> None:
     )
 
     print(f"Loading {args.dataset} and building indices/models once (untimed) ...")
-    dataset = load_scifact()
+    dataset = load_dataset_by_name(args.dataset)
     payload = run_quality_latency(
         dataset,
         k=args.k,
@@ -421,7 +450,7 @@ def main(argv=None) -> None:
     print()
     print(format_quality_latency_table(payload))
 
-    output = args.output or output_path_for(args.max_queries)
+    output = args.output or output_path_for(args.max_queries, args.dataset)
     save_results(payload, output)
     print(f"\nSaved results to {output}")
 

@@ -1,6 +1,8 @@
-"""Fusion weight (alpha) ablation on SciFact.
+"""Fusion weight (alpha) ablation, per dataset.
 
-    python experiments/fusion_ablation.py --max-queries 20 \
+    python experiments/fusion_ablation.py --dataset scifact \
+        --max-queries 20 --k 10 --candidate-k 50
+    python experiments/fusion_ablation.py --dataset fiqa \
         --k 10 --candidate-k 50
 
 Evaluates Weighted Hybrid Retrieval over a grid of alpha values
@@ -9,9 +11,11 @@ using the existing ``HybridRetriever``. One BM25 index, one DenseRetriever
 (one dense corpus encoding, one FAISS index) are built per run and reused
 for every alpha value; only alpha changes between conditions.
 
-Smoke runs save to ``outputs/scifact_fusion_ablation_smokeN.json``; the
-full run saves to ``outputs/scifact_fusion_ablation.json`` and also
-generates metric-vs-alpha plots under ``assets/figures/``.
+Smoke runs save to ``outputs/<dataset>_fusion_ablation_smokeN.json``; the
+full run saves to ``outputs/<dataset>_fusion_ablation.json`` and also
+generates metric-vs-alpha plots under ``assets/figures/``. SciFact keeps
+its historical figure names; other datasets get a dataset prefix so
+figures never overwrite each other.
 """
 
 from __future__ import annotations
@@ -30,7 +34,8 @@ from experiments.benchmark import (
     save_results,
     select_query_ids,
 )
-from hybridsearch.data.scifact import SciFactDataset, load_scifact
+from hybridsearch.data.common import Dataset
+from hybridsearch.data.registry import DATASET_NAMES, load_dataset_by_name
 from hybridsearch.retrieval.bm25 import BM25
 from hybridsearch.retrieval.dense import DenseRetriever
 from hybridsearch.retrieval.hybrid import HybridRetriever
@@ -77,7 +82,7 @@ def build_alpha_retrievers(corpus, alpha_values, candidate_k: int,
 
 
 def run_fusion_ablation(
-    dataset: SciFactDataset,
+    dataset: Dataset,
     k: int = 10,
     candidate_k: int = 50,
     alpha_values: list | None = None,
@@ -124,11 +129,11 @@ def run_fusion_ablation(
     }
 
 
-def output_path_for(max_queries: int | None) -> str:
-    """JSON path that keeps smoke and full runs from overwriting each other."""
+def output_path_for(max_queries: int | None, dataset_name: str = "scifact") -> str:
+    """Dataset-specific JSON path that keeps smoke and full runs separate."""
     if max_queries is not None:
-        return f"outputs/scifact_fusion_ablation_smoke{max_queries}.json"
-    return "outputs/scifact_fusion_ablation.json"
+        return f"outputs/{dataset_name}_fusion_ablation_smoke{max_queries}.json"
+    return f"outputs/{dataset_name}_fusion_ablation.json"
 
 
 def format_ablation_table(payload: dict) -> str:
@@ -168,6 +173,13 @@ def extract_curve(payload: dict, metric: str):
     return alphas, values
 
 
+def _figure_filename(dataset_name: str, filename: str) -> str:
+    """Dataset-scoped figure name; SciFact keeps its historical names."""
+    if dataset_name == "scifact":
+        return filename
+    return f"{dataset_name}_{filename}"
+
+
 def plot_ablation(payload: dict, output_dir="assets/figures") -> list:
     """Plot every metric vs alpha from the actual ablation results.
 
@@ -183,6 +195,7 @@ def plot_ablation(payload: dict, output_dir="assets/figures") -> list:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    dataset_name = payload["metadata"]["dataset"]
     k = payload["metadata"]["k"]
     metrics = {
         f"precision@{k}": "fusion_alpha_precision.png",
@@ -199,12 +212,12 @@ def plot_ablation(payload: dict, output_dir="assets/figures") -> list:
         ax.plot(alphas, values, marker="o", linestyle="-")
         ax.set_xlabel("alpha")
         ax.set_ylabel(metric)
-        ax.set_title(f"SciFact: {metric} vs alpha")
+        ax.set_title(f"{dataset_name}: {metric} vs alpha")
         ax.set_xticks(alphas)
         ax.grid(True, linestyle=":", linewidth=0.5)
         fig.tight_layout()
 
-        path = output_dir / filename
+        path = output_dir / _figure_filename(dataset_name, filename)
         fig.savefig(path, dpi=150)
         plt.close(fig)
         paths.append(path)
@@ -214,7 +227,9 @@ def plot_ablation(payload: dict, output_dir="assets/figures") -> list:
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="scifact", choices=["scifact"])
+    parser.add_argument(
+        "--dataset", default="scifact", choices=list(DATASET_NAMES)
+    )
     parser.add_argument("--k", type=int, default=10, help="evaluation cutoff")
     parser.add_argument(
         "--candidate-k",
@@ -256,7 +271,7 @@ def main(argv=None) -> None:
     alphas = parse_alpha_values(args.alphas) if args.alphas else list(ALPHA_GRID)
 
     print(f"Loading {args.dataset} and building indices once ...")
-    dataset = load_scifact()
+    dataset = load_dataset_by_name(args.dataset)
     payload = run_fusion_ablation(
         dataset,
         k=args.k,
@@ -273,7 +288,7 @@ def main(argv=None) -> None:
     print()
     print(format_ablation_table(payload))
 
-    output = args.output or output_path_for(args.max_queries)
+    output = args.output or output_path_for(args.max_queries, args.dataset)
     save_results(payload, output)
     print(f"\nSaved results to {output}")
 

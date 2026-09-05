@@ -1,13 +1,22 @@
-"""First real retrieval benchmark: SciFact with BM25 / Dense / Hybrid.
+"""Real retrieval benchmark: BM25 / Dense / Hybrid, per dataset.
 
-    python experiments/benchmark.py --dataset scifact --k 10 \
+    python experiments/benchmark.py --dataset scifact --k 10 \\
         --candidate-k 50 --alpha 0.5 --max-queries 20
+    python experiments/benchmark.py --dataset fiqa --k 10 \\
+        --candidate-k 50 --max-queries 20
 
 Builds the BM25 and dense indices exactly once per run, evaluates every
 query that has qrels with the Phase 5 metrics, prints a table of
 arithmetic means across queries, and saves the payload as JSON under
 ``outputs/``. Model/index construction time is not part of the measured
 quality numbers (latency benchmarking comes later).
+
+The dataset is selected with ``--dataset`` (see
+``hybridsearch.data.registry``); the four methods and every default are
+shared by all datasets. Smoke runs save to
+``outputs/<dataset>_benchmark_smokeN.json`` and full runs to
+``outputs/<dataset>_benchmark.json``, so datasets never overwrite each
+other.
 """
 
 from __future__ import annotations
@@ -22,7 +31,8 @@ if __package__ in (None, ""):
     # `hybridsearch` package without installing the project.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hybridsearch.data.scifact import SciFactDataset, load_scifact
+from hybridsearch.data.common import Dataset
+from hybridsearch.data.registry import DATASET_NAMES, load_dataset_by_name
 from hybridsearch.evaluation.metrics import evaluate_query, mean_metrics
 from hybridsearch.retrieval.bm25 import BM25
 from hybridsearch.retrieval.dense import DenseRetriever
@@ -43,7 +53,7 @@ def select_query_ids(queries, qrels, max_queries=None) -> list[str]:
     return query_ids
 
 
-def evaluate_retriever(retriever, dataset: SciFactDataset, query_ids, k: int):
+def evaluate_retriever(retriever, dataset: Dataset, query_ids, k: int):
     """Arithmetic mean of per-query metrics for one retriever."""
     per_query = []
     for query_id in query_ids:
@@ -77,7 +87,7 @@ def build_retrievers(corpus, candidate_k: int, alpha: float, rrf_k: float, dense
 
 
 def run_benchmark(
-    dataset: SciFactDataset,
+    dataset: Dataset,
     k: int = 10,
     candidate_k: int = 50,
     alpha: float = 0.5,
@@ -159,9 +169,20 @@ def format_table(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def output_path_for(dataset_name: str, max_queries: int | None = None) -> str:
+    """Dataset-specific JSON path; smoke runs get their own file.
+
+    Keeps datasets (and smoke vs full runs) from overwriting each other.
+    """
+    suffix = f"_smoke{max_queries}" if max_queries is not None else ""
+    return f"outputs/{dataset_name}_benchmark{suffix}.json"
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="scifact", choices=["scifact"])
+    parser.add_argument(
+        "--dataset", default="scifact", choices=list(DATASET_NAMES)
+    )
     parser.add_argument("--k", type=int, default=10, help="evaluation cutoff")
     parser.add_argument(
         "--candidate-k",
@@ -194,8 +215,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="outputs/scifact_benchmark.json",
-        help="path of the JSON results file",
+        default=None,
+        help="override the default dataset-specific JSON output path",
     )
     return parser.parse_args(argv)
 
@@ -204,8 +225,9 @@ def main(argv=None) -> None:
     args = parse_args(argv)
 
     print(f"Loading {args.dataset} ...")
-    dataset = load_scifact()
+    dataset = load_dataset_by_name(args.dataset)
     print(
+        f"source={dataset.source} "
         f"documents={len(dataset.corpus)} "
         f"queries={len(dataset.queries)} "
         f"qrel_query_ids={len(dataset.qrels)}"
@@ -224,8 +246,9 @@ def main(argv=None) -> None:
     print()
     print(format_table(payload))
 
-    save_results(payload, args.output)
-    print(f"\nSaved results to {args.output}")
+    output = args.output or output_path_for(args.dataset, args.max_queries)
+    save_results(payload, output)
+    print(f"\nSaved results to {output}")
 
 
 if __name__ == "__main__":

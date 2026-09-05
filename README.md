@@ -4,7 +4,7 @@ A reproducible, end-to-end information retrieval benchmark that compares sparse,
 
 ## Overview
 
-HybridSearch-Bench evaluates the core components of a modern retrieval stack — lexical search (BM25), semantic search (dense embeddings + FAISS), rank fusion (weighted and reciprocal rank fusion), and second-stage neural reranking (cross-encoder) — against the real qrels of the SciFact dataset.
+HybridSearch-Bench evaluates the core components of a modern retrieval stack — lexical search (BM25), semantic search (dense embeddings + FAISS), rank fusion (weighted and reciprocal rank fusion), and second-stage neural reranking (cross-encoder) — against the real qrels of the SciFact and FiQA datasets.
 
 This is an information retrieval benchmark, **not** a RAG chatbot: there is no generation, no agent, and no frontend. The project focuses exclusively on retrieval, ranking, and evaluation.
 
@@ -55,6 +55,18 @@ SciFact is a scientific claim-verification corpus, loaded through the BEIR relea
 | Qrels | `BeIR/scifact-qrels`, split `test` | 300 query ids, 339 judged pairs |
 
 Evaluation uses the 300 queries that have qrels. Titles and bodies are joined per document, all ids are preserved as strings, and inconsistent records fail loudly instead of being dropped.
+
+### FiQA
+
+FiQA is a financial Q&A corpus (StackExchange personal-finance answers), also loaded through BEIR on Hugging Face:
+
+| Part | Source | Size |
+|---|---|---|
+| Corpus | `BeIR/fiqa`, config `corpus`, split `corpus` | 57,638 documents |
+| Queries | `BeIR/fiqa`, config `queries`, split `queries` | 6,648 queries |
+| Qrels | `BeIR/fiqa-qrels`, split `test` | 648 query ids, 1,706 judged pairs |
+
+FiQA documents have no titles and binary (0/1) qrels; the 38 published corpus posts with empty text are kept as-is, never silently dropped. SciFact remains the primary deep-analysis dataset; FiQA is used for cross-dataset robustness validation.
 
 ## Methods
 
@@ -117,6 +129,56 @@ Full 300-query SciFact evaluation with `k = 10`, `alpha = 0.5`, RRF `k = 60`, hy
 Numbers reproduced from the generated artifacts `outputs/scifact_reranker_benchmark.json` and `outputs/scifact_quality_latency.json` (`outputs/` is gitignored; the scripts regenerate them).
 
 On SciFact, **Hybrid Weighted + rerank@20 is the strongest tested configuration among these methods**, improving every metric over retrieval alone. This statement is scoped to SciFact and this exact setup — it is not a claim of universal superiority.
+
+## Multi-Dataset Results
+
+Phase 13 adds FiQA as a second real dataset: SciFact stays the primary deep-analysis dataset, while FiQA checks whether the SciFact conclusions generalize to a different domain (financial Q&A). Both datasets use the identical methods, defaults, and evaluation protocol.
+
+Retrieval-only comparison, full runs (`k = 10`, `alpha = 0.5`, RRF `k = 60`, hybrid `candidate_k = 50`):
+
+| Dataset | Method | Precision@10 | Recall@10 | MRR@10 | nDCG@10 |
+|---|---:|---:|---:|---:|---:|
+| SciFact | BM25 | 0.0760 | 0.6803 | 0.5381 | 0.5694 |
+| SciFact | Dense | 0.0883 | 0.7833 | 0.6047 | 0.6451 |
+| SciFact | Hybrid Weighted | 0.0907 | 0.8033 | 0.6413 | 0.6771 |
+| SciFact | Hybrid RRF | 0.0880 | 0.7902 | 0.6139 | 0.6522 |
+| FiQA | BM25 | 0.0461 | 0.2101 | 0.2044 | 0.1631 |
+| FiQA | Dense | 0.1045 | 0.4413 | 0.4451 | 0.3687 |
+| FiQA | Hybrid Weighted | 0.0991 | 0.4294 | 0.4068 | 0.3420 |
+| FiQA | Hybrid RRF | 0.0920 | 0.4017 | 0.3817 | 0.3150 |
+
+The SciFact rows are the retrieval-only rows of the full SciFact reranker-benchmark payload (`outputs/scifact_reranker_benchmark.json`, hybrid candidate pool 50) and the FiQA rows come from `outputs/fiqa_benchmark.json` (hybrid candidate pool 50) — identical retrieval semantics on both datasets.
+
+![Multi-dataset nDCG@10](assets/figures/multidataset_ndcg.png)
+
+Best weighted-fusion alpha per dataset (full grid `0.00`-`1.00`, step `0.25`):
+
+| Dataset | Best alpha | nDCG@10 at best |
+|---|---:|---:|
+| SciFact | 0.25 | 0.6781 |
+| FiQA | 0.25 | 0.3860 |
+
+![Best alpha by dataset](assets/figures/multidataset_best_alpha.png)
+
+Reranking comparison — canonical configuration: Hybrid Weighted with hybrid fusion pool 50 + cross-encoder `rerank@20`, final `k = 10` (same quality/latency script, full runs, on both datasets):
+
+| Dataset | Hybrid Weighted nDCG@10 | + rerank@20 nDCG@10 | Mean rerank latency |
+|---|---:|---:|---:|
+| SciFact | 0.6771 | 0.6998 | 673.66 ms |
+| FiQA | 0.3420 | 0.3784 | 793.10 ms |
+
+**Reranker candidate-pool semantics.** `experiments/reranker_benchmark.py` couples one knob (`--candidate-k` = hybrid fusion pool AND reranker pool), while `experiments/quality_latency.py` decouples them (`--hybrid-candidate-k` 50 + `--candidate-sizes`). The full FiQA reranker-benchmark payload therefore used pool 20 for both stages: Hybrid Weighted 0.3390 -> reranked 0.3735 nDCG@10, versus 0.3420 -> 0.3784 with the canonical pool-50 fusion in the table above. That difference is expected — weighted fusion min-max-normalizes over the fetched pool (20+20 vs 50+50 documents), so the fused order, and hence the 20 candidates handed to the reranker, differs. Every reranker claim in this README uses the canonical pool-50 + rerank@20 configuration.
+
+Cross-dataset observations (actual data only, no claims of generality):
+
+- **Dense beats BM25 on both datasets**, but the gap is far larger on FiQA (nDCG@10 0.3687 vs 0.1631) than on SciFact (0.6451 vs 0.5694).
+- **Hybrid Weighted at the default `alpha = 0.5` beats the strongest single retriever on SciFact but not on FiQA** (0.6771 > 0.6451; 0.3420 < 0.3687). At each dataset's best alpha, hybrid edges out dense on both (SciFact 0.6781 vs 0.6451; FiQA 0.3860 vs 0.3687).
+- **The best alpha is 0.25 on both datasets, but the curve shapes differ**: on FiQA quality collapses steeply toward BM25-heavy fusion (0.1631 at `alpha = 1.0` vs 0.5694 on SciFact), so FiQA depends far more on the dense signal.
+- **RRF behaves consistently relative to weighted fusion**: weighted nDCG@10 exceeds RRF on both datasets (0.6771 vs 0.6522; 0.3420 vs 0.3150).
+- **Reranking improves both datasets** (canonical pool-50 + rerank@20 configuration), and the nDCG gain is relatively larger on FiQA (+0.0364, ~10.6%) than on SciFact (+0.0227, ~3.4%).
+- **Failure patterns differ qualitatively**: 193/648 FiQA queries (29.8%) are missed by both first-stage retrievers (Recall@10 = 0) vs 37/300 (12.3%) on SciFact; per-query, Dense beats BM25 354 vs 70 times on FiQA (92 vs 54 on SciFact), so BM25 is much weaker on FiQA than on SciFact.
+
+All numbers come from the generated artifacts under `outputs/` (`scifact_*` / `fiqa_*`); the cross-dataset table and both figures are produced by `python experiments/multidataset_summary.py` and saved to `outputs/multidataset_summary.json`.
 
 ## Fusion Alpha Ablation
 
@@ -207,7 +269,7 @@ pip install -e .
 
 - Python >= 3.11 (tested with 3.13);
 - all dependencies install from `pyproject.toml` — no separate `requirements.txt` is needed;
-- the first network use downloads SciFact and the pretrained models, which are then cached locally.
+- the first network use downloads SciFact/FiQA and the pretrained models, which are then cached locally.
 
 ## Quick Start
 
@@ -230,18 +292,22 @@ Experiments (each accepts `--help`):
 
 ```bash
 python experiments/benchmark.py           # BM25 / Dense / Hybrid on SciFact
+python experiments/benchmark.py --dataset fiqa   # same benchmark on FiQA
 python experiments/fusion_ablation.py     # alpha grid + figures
 python experiments/latency_benchmark.py   # per-query retrieval latency
 python experiments/reranker_benchmark.py  # reranking quality
 python experiments/quality_latency.py     # quality vs latency, candidate sizes
-python experiments/failure_analysis.py    # per-query failure report
+python experiments/failure_analysis.py    # per-query failure report (SciFact)
+python experiments/multidataset_summary.py  # cross-dataset table + figures
+    --benchmarks outputs/scifact_reranker_benchmark.json outputs/fiqa_benchmark.json \
+    --ablations outputs/scifact_fusion_ablation.json outputs/fiqa_fusion_ablation.json
 ```
 
-Use `--max-queries 20` for a fast smoke run. Full runs evaluate all 300 queries with qrels and save JSON under `outputs/`; the full fusion and quality runs also (re)generate the figures in `assets/figures/`. The experiment scripts work without installation too — they add the repository root to `sys.path` — but `pip install -e .` is the supported setup.
+Use `--max-queries 20` for a fast smoke run. Full runs evaluate all qrels queries — 300 on SciFact, 648 on FiQA — and save dataset-scoped JSON under `outputs/`; the full fusion and quality runs also (re)generate the figures in `assets/figures/`. The experiment scripts work without installation too — they add the repository root to `sys.path` — but `pip install -e .` is the supported setup.
 
 ## Reproducibility
 
-- dataset: `BeIR/scifact` (corpus, queries) and `BeIR/scifact-qrels` (test);
+- datasets: `BeIR/scifact` (corpus, queries) + `BeIR/scifact-qrels` (test) and `BeIR/fiqa` (corpus, queries) + `BeIR/fiqa-qrels` (test);
 - dense model: `sentence-transformers/all-MiniLM-L6-v2`;
 - reranker model: `cross-encoder/ms-marco-MiniLM-L-6-v2`;
 - evaluation cutoff `k = 10`;
@@ -258,12 +324,12 @@ Use `--max-queries 20` for a fast smoke run. Full runs evaluate all 300 queries 
 
 ```
 hybridsearch/            the Python package
-  data/                  SciFact loading/normalization + toy corpus
+  data/                  SciFact + FiQA loading/normalization, shared helpers, registry + toy corpus
   retrieval/             BM25, dense/FAISS, fusion, hybrid, simple token retrieval
   ranking/               cross-encoder reranker
   evaluation/            Precision / Recall / MRR / nDCG metrics
   indexing.py            inverted index over the toy corpus
-experiments/             runnable benchmark and analysis scripts
+experiments/             runnable benchmark, ablation, analysis, and multi-dataset summary scripts
 tests/                   offline deterministic pytest suite
 analysis/                generated failure analysis report
 assets/figures/          generated benchmark figures
@@ -275,11 +341,11 @@ assets/figures/          generated benchmark figures
 python -m pytest -q
 ```
 
-280 tests pass, fully offline (no model or dataset downloads).
+331 tests pass, fully offline (no model or dataset downloads).
 
 ## Limitations
 
-- currently evaluated primarily on SciFact — one dataset, one domain;
+- two datasets so far — SciFact (primary deep-analysis dataset) and FiQA (cross-dataset robustness validation); other domains remain untested;
 - the dense and reranker models are pretrained general models, not fine-tuned on SciFact;
 - latency is a single-machine CPU/WSL measurement;
 - candidate-size conclusions may differ with a different model, dataset, or hardware;
@@ -289,7 +355,7 @@ python -m pytest -q
 
 ## Future Work
 
-- evaluation on NFCorpus / FiQA;
+- evaluation on NFCorpus and further domains;
 - embedding model comparison;
 - FAISS Flat vs HNSW vs IVF;
 - query expansion;

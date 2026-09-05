@@ -12,189 +12,44 @@ preserved exactly as strings. Inconsistencies (duplicate ids, qrel entries
 referencing unknown documents or queries, missing expected columns) fail
 with ``ValueError`` instead of being silently dropped.
 
+The generic normalization helpers live in ``hybridsearch.data.common`` and
+are re-exported here so the SciFact public API is unchanged; the FiQA
+loader (Phase 13) shares the same helpers.
+
 The ``datasets`` import is lazy, so importing this module never touches
 the network and unit tests stay fully offline.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Set
 from dataclasses import dataclass, field
-from typing import Any
+
+from hybridsearch.data.common import (
+    CORPUS_ID_COLUMN,
+    CORPUS_TEXT_COLUMN,
+    CORPUS_TITLE_COLUMN,
+    QREL_DOC_COLUMN,
+    QREL_QUERY_COLUMN,
+    QREL_SCORE_COLUMN,
+    QUERY_ID_COLUMN,
+    QUERY_TEXT_COLUMN,
+    Dataset,
+    normalize_corpus,
+    normalize_qrels,
+    normalize_queries,
+)
 
 SCIFACT_HF_PATH = "BeIR/scifact"
 SCIFACT_QRELS_HF_PATH = "BeIR/scifact-qrels"
 SCIFACT_QRELS_SPLIT = "test"
 
-# Column names of the BEIR SciFact splits on Hugging Face (verified against
-# the published schema; loading fails clearly if they ever change).
-CORPUS_ID_COLUMN = "_id"
-CORPUS_TITLE_COLUMN = "title"
-CORPUS_TEXT_COLUMN = "text"
-QUERY_ID_COLUMN = "_id"
-QUERY_TEXT_COLUMN = "text"
-QREL_QUERY_COLUMN = "query-id"
-QREL_DOC_COLUMN = "corpus-id"
-QREL_SCORE_COLUMN = "score"
-
 
 @dataclass
-class SciFactDataset:
+class SciFactDataset(Dataset):
     """Normalized SciFact: corpus list, query map, and qrel map."""
 
-    corpus: list[dict[str, str]]
-    queries: dict[str, str]
-    qrels: dict[str, dict[str, int]]
     name: str = "scifact"
     source: str = field(default=SCIFACT_HF_PATH)
-
-    def corpus_ids(self) -> set[str]:
-        """Document ids of the corpus."""
-        return {document["id"] for document in self.corpus}
-
-    def query_ids(self) -> set[str]:
-        """Ids of all loaded queries."""
-        return set(self.queries)
-
-
-# --- field helpers ---
-
-
-def _string_field(record: Mapping[str, Any], column: str, kind: str) -> str:
-    if column not in record:
-        raise ValueError(f"{kind} record is missing the {column!r} column")
-    value = str(record[column]).strip()
-    if not value:
-        raise ValueError(f"{kind} record has an empty {column!r} value")
-    return value
-
-
-def _optional_string(record: Mapping[str, Any], column: str) -> str:
-    return str(record.get(column) or "").strip()
-
-
-def _check_no_duplicates(ids: Iterable[str], kind: str) -> None:
-    seen: set[str] = set()
-    for doc_id in ids:
-        if doc_id in seen:
-            raise ValueError(f"duplicate {kind} id: {doc_id!r}")
-        seen.add(doc_id)
-
-
-def _check_missing_ids(
-    ids: Iterable[str],
-    allowed: Set[str],
-    id_kind: str,
-    target_kind: str,
-) -> None:
-    missing = sorted(set(ids) - allowed)
-    if missing:
-        preview = ", ".join(repr(m) for m in missing[:3])
-        raise ValueError(
-            f"qrels reference {len(missing)} {id_kind} id(s) missing from "
-            f"{target_kind}: {preview}"
-        )
-
-
-# --- normalization ---
-
-
-def normalize_corpus(
-    records: Iterable[Mapping[str, Any]],
-    id_column: str = CORPUS_ID_COLUMN,
-    title_column: str = CORPUS_TITLE_COLUMN,
-    text_column: str = CORPUS_TEXT_COLUMN,
-) -> list[dict[str, str]]:
-    """Normalize raw corpus records into ``[{"id", "text"}]``.
-
-    The id is preserved exactly as a string. Title and body are joined
-    with a single space; a missing or empty title contributes nothing.
-    Duplicate ids raise ``ValueError``.
-    """
-    corpus: list[dict[str, str]] = []
-    ids: list[str] = []
-
-    for record in records:
-        doc_id = _string_field(record, id_column, "corpus")
-        title = _optional_string(record, title_column)
-        body = _string_field(record, text_column, "corpus")
-
-        parts = [part for part in (title, body) if part]
-        text = " ".join(parts).strip()
-        if not text:
-            raise ValueError(f"corpus record {doc_id!r} has no text content")
-
-        ids.append(doc_id)
-        corpus.append({"id": doc_id, "text": text})
-
-    _check_no_duplicates(ids, "corpus")
-    return corpus
-
-
-def normalize_queries(
-    records: Iterable[Mapping[str, Any]],
-    id_column: str = QUERY_ID_COLUMN,
-    text_column: str = QUERY_TEXT_COLUMN,
-) -> dict[str, str]:
-    """Normalize raw query records into ``{query_id: query_text}``.
-
-    Query ids are preserved exactly as strings. Duplicate ids raise
-    ``ValueError``.
-    """
-    queries: dict[str, str] = {}
-
-    for record in records:
-        query_id = _string_field(record, id_column, "query")
-        text = _string_field(record, text_column, "query")
-
-        if query_id in queries:
-            raise ValueError(f"duplicate query id: {query_id!r}")
-        queries[query_id] = text
-
-    return queries
-
-
-def normalize_qrels(
-    records: Iterable[Mapping[str, Any]],
-    corpus_ids: Set[str] | None = None,
-    query_ids: Set[str] | None = None,
-    query_column: str = QREL_QUERY_COLUMN,
-    doc_column: str = QREL_DOC_COLUMN,
-    score_column: str = QREL_SCORE_COLUMN,
-) -> dict[str, dict[str, int]]:
-    """Normalize raw qrel records into ``{query_id: {doc_id: grade}}``.
-
-    Ids are preserved exactly as strings and relevance grades are kept as
-    integers (``> 0`` means relevant, graded values feed nDCG). When
-    ``corpus_ids``/``query_ids`` are provided, qrel entries referencing
-    unknown documents or queries raise ``ValueError`` so misaligned ids
-    never pass silently.
-    """
-    qrels: dict[str, dict[str, int]] = {}
-
-    for record in records:
-        query_id = _string_field(record, query_column, "qrel")
-        doc_id = _string_field(record, doc_column, "qrel")
-        if score_column not in record:
-            raise ValueError(f"qrel record is missing the {score_column!r} column")
-        grade = int(record[score_column])
-
-        qrels.setdefault(query_id, {})[doc_id] = grade
-
-    if corpus_ids is not None:
-        _check_missing_ids(
-            (doc_id for entries in qrels.values() for doc_id in entries),
-            corpus_ids,
-            "document",
-            "the corpus",
-        )
-    if query_ids is not None:
-        _check_missing_ids(qrels, query_ids, "query", "the query set")
-
-    return qrels
-
-
-# --- loading ---
 
 
 def load_scifact() -> SciFactDataset:

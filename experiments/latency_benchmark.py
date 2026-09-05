@@ -1,6 +1,8 @@
-"""Query-time latency benchmark for SciFact (BM25 / Dense / Hybrid).
+"""Query-time latency benchmark (BM25 / Dense / Hybrid), per dataset.
 
     python experiments/latency_benchmark.py --dataset scifact \
+        --k 10 --candidate-k 50 --alpha 0.5
+    python experiments/latency_benchmark.py --dataset fiqa \
         --k 10 --candidate-k 50 --alpha 0.5
 
 Measures per-query retrieval latency only: dataset loading, BM25 index
@@ -8,8 +10,8 @@ construction, dense corpus encoding, FAISS index construction, and model
 loading all happen *before* any timing. Each query is timed once with
 ``time.perf_counter()`` around a single ``search`` call, after a small
 per-method warmup. Reports mean, median, and p95 latency per query across
-all measured SciFact test queries and saves the payload as JSON under
-``outputs/``.
+all measured test queries of the selected dataset and saves the payload
+as JSON under ``outputs/<dataset>_latency.json``.
 """
 
 from __future__ import annotations
@@ -31,7 +33,8 @@ from experiments.benchmark import (
     save_results,
     select_query_ids,
 )
-from hybridsearch.data.scifact import SciFactDataset, load_scifact
+from hybridsearch.data.common import Dataset
+from hybridsearch.data.registry import DATASET_NAMES, load_dataset_by_name
 from hybridsearch.retrieval.dense import DenseRetriever
 
 
@@ -84,7 +87,7 @@ def measure_method(retriever, query_texts, top_k: int, warmup: int = 0, timer=ti
 
 
 def run_latency_benchmark(
-    dataset: SciFactDataset,
+    dataset: Dataset,
     k: int = 10,
     candidate_k: int = 50,
     alpha: float = 0.5,
@@ -167,9 +170,16 @@ def format_latency_table(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def output_path_for(dataset_name: str) -> str:
+    """Dataset-specific JSON path for the latency payload."""
+    return f"outputs/{dataset_name}_latency.json"
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="scifact", choices=["scifact"])
+    parser.add_argument(
+        "--dataset", default="scifact", choices=list(DATASET_NAMES)
+    )
     parser.add_argument("--k", type=int, default=10, help="retrieval top_k per query")
     parser.add_argument(
         "--candidate-k",
@@ -208,8 +218,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        default="outputs/scifact_latency.json",
-        help="path of the JSON results file",
+        default=None,
+        help="override the default dataset-specific JSON output path",
     )
     return parser.parse_args(argv)
 
@@ -218,7 +228,7 @@ def main(argv=None) -> None:
     args = parse_args(argv)
 
     print(f"Loading {args.dataset} and building indices (untimed) ...")
-    dataset = load_scifact()
+    dataset = load_dataset_by_name(args.dataset)
     payload = run_latency_benchmark(
         dataset,
         k=args.k,
@@ -237,8 +247,9 @@ def main(argv=None) -> None:
     print()
     print(format_latency_table(payload))
 
-    save_results(payload, args.output)
-    print(f"\nSaved results to {args.output}")
+    output = args.output or output_path_for(args.dataset)
+    save_results(payload, output)
+    print(f"\nSaved results to {output}")
 
 
 if __name__ == "__main__":

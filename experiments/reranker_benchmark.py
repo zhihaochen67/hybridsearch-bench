@@ -1,7 +1,9 @@
-"""SciFact benchmark with cross-encoder reranking (BM25 / Dense / Hybrid).
+"""Benchmark with cross-encoder reranking (BM25 / Dense / Hybrid), per dataset.
 
-    python experiments/reranker_benchmark.py --max-queries 20 \
-        --k 10 --candidate-k 50
+    python experiments/reranker_benchmark.py --dataset scifact \
+        --max-queries 20 --k 10 --candidate-k 50
+    python experiments/reranker_benchmark.py --dataset fiqa \
+        --max-queries 20 --k 10 --candidate-k 20
 
 Measures retrieval quality with and without second-stage cross-encoder
 reranking:
@@ -14,13 +16,23 @@ reranking:
 The reranker always sees a candidate pool of ``candidate_k >= k``
 documents (validated explicitly); it is never asked to rerank an
 already-truncated top-k. Every index and model is built once per run —
+
+``--candidate-k`` is a single coupled knob: the same value sets the
+hybrid fusion candidate pool (``HybridRetriever.candidate_k``) *and* the
+number of candidates passed to the reranker. This also affects the
+retrieval-only hybrid rows, because weighted fusion min-max-normalizes
+over the fetched pool. For a reranker comparison that keeps the
+project-standard hybrid pool (50) while varying only the reranker pool,
+use ``experiments/quality_latency.py`` (``--hybrid-candidate-k 50
+--candidate-sizes 20``); its ``rerank@20`` rows are the canonical
+cross-dataset reranker configuration.
 BM25 index, dense corpus embeddings, FAISS index, both hybrid retrievers,
 and the cross-encoder are reused across all queries.
 
 Smoke runs (``--max-queries N``) save to
-``outputs/scifact_reranker_smokeN.json``; the full run saves to
-``outputs/scifact_reranker_benchmark.json``, so neither the smoke nor the
-full run overwrites the other or the retrieval/latency outputs.
+``outputs/<dataset>_reranker_smokeN.json``; the full run saves to
+``outputs/<dataset>_reranker_benchmark.json``, so neither the smoke nor
+the full run overwrites the other or the retrieval/latency outputs.
 """
 
 from __future__ import annotations
@@ -40,7 +52,8 @@ from experiments.benchmark import (
     save_results,
     select_query_ids,
 )
-from hybridsearch.data.scifact import SciFactDataset, load_scifact
+from hybridsearch.data.common import Dataset
+from hybridsearch.data.registry import DATASET_NAMES, load_dataset_by_name
 from hybridsearch.evaluation.metrics import evaluate_query, mean_metrics
 from hybridsearch.ranking.reranker import CrossEncoderReranker
 from hybridsearch.retrieval.dense import DenseRetriever
@@ -84,7 +97,7 @@ def build_methods(corpus, k: int, candidate_k: int, alpha: float, rrf_k: float,
     }
 
 
-def evaluate_method(search_fn, dataset: SciFactDataset, query_ids, k: int):
+def evaluate_method(search_fn, dataset: Dataset, query_ids, k: int):
     """Arithmetic mean of per-query metrics for one query->ranked_ids callable."""
     per_query = []
     for query_id in query_ids:
@@ -94,7 +107,7 @@ def evaluate_method(search_fn, dataset: SciFactDataset, query_ids, k: int):
 
 
 def run_reranker_benchmark(
-    dataset: SciFactDataset,
+    dataset: Dataset,
     k: int = 10,
     candidate_k: int = 50,
     alpha: float = 0.5,
@@ -148,22 +161,24 @@ def run_reranker_benchmark(
     }
 
 
-def output_path_for(max_queries: int | None) -> str:
-    """JSON path that keeps smoke and full runs from overwriting each other."""
+def output_path_for(max_queries: int | None, dataset_name: str = "scifact") -> str:
+    """Dataset-specific JSON path that keeps smoke and full runs separate."""
     if max_queries is not None:
-        return f"outputs/scifact_reranker_smoke{max_queries}.json"
-    return "outputs/scifact_reranker_benchmark.json"
+        return f"outputs/{dataset_name}_reranker_smoke{max_queries}.json"
+    return f"outputs/{dataset_name}_reranker_benchmark.json"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="scifact", choices=["scifact"])
+    parser.add_argument(
+        "--dataset", default="scifact", choices=list(DATASET_NAMES)
+    )
     parser.add_argument("--k", type=int, default=10, help="final evaluation cutoff")
     parser.add_argument(
         "--candidate-k",
         type=int,
         default=50,
-        help="hybrid candidate pool fed to the reranker",
+        help="single coupled knob: hybrid fusion candidate pool AND reranker pool",
     )
     parser.add_argument(
         "--alpha",
@@ -205,7 +220,7 @@ def main(argv=None) -> None:
     args = parse_args(argv)
 
     print(f"Loading {args.dataset} and building indices/models (untimed) ...")
-    dataset = load_scifact()
+    dataset = load_dataset_by_name(args.dataset)
     payload = run_reranker_benchmark(
         dataset,
         k=args.k,
@@ -224,7 +239,7 @@ def main(argv=None) -> None:
     print()
     print(format_table(payload))
 
-    output = args.output or output_path_for(args.max_queries)
+    output = args.output or output_path_for(args.max_queries, args.dataset)
     save_results(payload, output)
     print(f"\nSaved results to {output}")
 
