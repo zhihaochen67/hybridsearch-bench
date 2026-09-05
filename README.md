@@ -237,6 +237,57 @@ Careful interpretation:
 - larger candidate pools did **not** improve quality in this setup;
 - one possible explanation is that the cross-encoder's scores on out-of-domain scientific claims are noisy and reorder near-tied candidates — this is a hypothesis, not a demonstrated cause.
 
+## FAISS Index Study
+
+Beyond the Flat exact-search index used by every benchmark so far, Phase 14 compares FAISS index configurations on the full FiQA set (57,638 documents, 648 judged queries, `k = 10`):
+
+- **Flat** (`IndexFlatIP`) is the exact nearest-neighbor reference — ANN Recall@10 = 1.0 by construction;
+- **HNSW** (`IndexHNSWFlat`, inner product over L2-normalized embeddings) with M = 32, efConstruction = 200, efSearch in {16, 32, 64, 128};
+- **IVF** (`IndexIVFFlat`, IP, trained on the corpus) with nlist in {256, 512, 1024} × nprobe in {8, 16, 32, 64}.
+
+ANN Recall@10 = |ANN top-10 ∩ Flat top-10| / 10 per query, macro-averaged over all 648 queries — it measures how closely an approximate index reproduces the exact neighbors and is **not** qrel relevance Recall@10. The corpus and all 648 query texts are encoded exactly once and the same float32 L2-normalized embeddings feed every configuration; encoding and model loading are excluded from all timings. Per-query latency covers only the FAISS search on precomputed query embeddings (3 untimed warmup passes + 5 timed passes per configuration; per-query latency = mean over passes). These are vector-index search latencies, not end-to-end semantic retrieval latency.
+
+| Config | ANN R@10 | Queries ≥0.9 | Build s | Size MB | Mean ms | qrel nDCG@10 |
+|---|---:|---:|---:|---:|---:|---:|
+| flat | 1.0000 | 648 | 0.068 | 88.53 | 1.997 | 0.3687 |
+| hnsw efS16 | 0.9366 | 552 | 2.577 | 104.22 | 0.058 | 0.3509 |
+| hnsw efS32 | 0.9792 | 627 | 2.577 | 104.22 | 0.094 | 0.3616 |
+| hnsw efS64 | 0.9941 | 643 | 2.577 | 104.22 | 0.156 | 0.3642 |
+| hnsw efS128 | 0.9983 | 646 | 2.577 | 104.22 | 0.284 | 0.3671 |
+| ivf n256 p8 | 0.8906 | 477 | 1.169 | 89.39 | 0.129 | 0.3358 |
+| ivf n256 p16 | 0.9468 | 561 | 1.169 | 89.39 | 0.238 | 0.3524 |
+| ivf n256 p32 | 0.9764 | 612 | 1.169 | 89.39 | 0.472 | 0.3596 |
+| ivf n256 p64 | 0.9923 | 642 | 1.169 | 89.39 | 0.888 | 0.3663 |
+| ivf n512 p8 | 0.8611 | 429 | 2.215 | 89.78 | 0.076 | 0.3289 |
+| ivf n512 p16 | 0.9231 | 520 | 2.215 | 89.78 | 0.131 | 0.3436 |
+| ivf n512 p32 | 0.9619 | 595 | 2.215 | 89.78 | 0.253 | 0.3567 |
+| ivf n512 p64 | 0.9850 | 631 | 2.215 | 89.78 | 0.484 | 0.3625 |
+| ivf n1024 p8 | 0.8250 | 373 | 4.238 | 90.57 | 0.059 | 0.3217 |
+| ivf n1024 p16 | 0.9000 | 489 | 4.238 | 90.57 | 0.094 | 0.3367 |
+| ivf n1024 p32 | 0.9472 | 570 | 4.238 | 90.57 | 0.151 | 0.3510 |
+| ivf n1024 p64 | 0.9739 | 612 | 4.238 | 90.57 | 0.276 | 0.3569 |
+
+![FAISS recall vs latency](assets/figures/faiss_recall_latency.png)
+
+![FAISS index sizes](assets/figures/faiss_index_size.png)
+
+![HNSW efSearch sweep](assets/figures/faiss_hnsw_efsearch.png)
+
+![IVF nprobe sweep](assets/figures/faiss_ivf_nprobe.png)
+
+Recommended FiQA operating points (measured, FiQA-only — not claims of universal optimality):
+
+- **HNSW efSearch = 64** is the best speed/recall tradeoff: 0.9941 ANN Recall@10 (643/648 queries ≥ 0.9) at 0.156 ms mean index-search latency — about 12.8× faster than Flat's 1.997 ms for a 0.006 recall loss; qrel nDCG@10 moves only from 0.3687 to 0.3642. efSearch = 128 raises recall to 0.9983 at 0.284 ms when recall is prioritized. HNSW provides the strongest high-recall tradeoff in the tested grid: around ANN Recall@10 ≈ 0.99, HNSW efSearch=64 is substantially faster than the IVF configurations reaching comparable recall (0.156 ms vs 0.484–0.888 ms at nprobe = 64).
+- **IVF nlist = 512, nprobe = 64** is the best IVF tradeoff: 0.9850 recall at 0.484 ms (about 4.1× faster than Flat). nlist = 1024, nprobe = 64 trades recall down to 0.9739 for 0.276 ms; nlist = 256, nprobe = 64 is the highest-recall IVF point (0.9923) at 0.888 ms. In this grid, larger nlist means finer partitioning (more cells): at a fixed nprobe it searches a smaller fraction of the corpus, which lowered ANN recall at every nprobe (e.g. at nprobe = 64: 0.9923 → 0.9850 → 0.9739 for nlist 256 → 512 → 1024) while also lowering latency.
+
+The secondary qrel diagnostic shows aggressive ANN settings do move relevance: qrel nDCG@10 ranges from 0.3217 (ivf n1024 p8) to the Flat 0.3687 (which matches the FiQA Dense benchmark exactly), so recall-optimized configurations matter in practice, not only for the approximation metric.
+
+Limitations:
+
+- results are specific to FiQA, this embedding model (`sentence-transformers/all-MiniLM-L6-v2`, 384-d), and this machine;
+- the study covers Flat/HNSW/IVF-Flat only — no PQ/OPQ, no GPU, no larger ANN sweep;
+- reported latencies are FAISS index-search only; end-to-end dense retrieval latency is dominated by query encoding on CPU.
+
 ## Failure Analysis
 
 Per-query failure analysis over the same 300 queries (comparison metric: nDCG@10):
@@ -297,6 +348,7 @@ python experiments/fusion_ablation.py     # alpha grid + figures
 python experiments/latency_benchmark.py   # per-query retrieval latency
 python experiments/reranker_benchmark.py  # reranking quality
 python experiments/quality_latency.py     # quality vs latency, candidate sizes
+python experiments/faiss_index_benchmark.py  # FAISS index comparison (Flat/HNSW/IVF)
 python experiments/failure_analysis.py    # per-query failure report (SciFact)
 python experiments/multidataset_summary.py  # cross-dataset table + figures
     --benchmarks outputs/scifact_reranker_benchmark.json outputs/fiqa_benchmark.json \
@@ -312,6 +364,7 @@ Use `--max-queries 20` for a fast smoke run. Full runs evaluate all qrels querie
 - reranker model: `cross-encoder/ms-marco-MiniLM-L-6-v2`;
 - evaluation cutoff `k = 10`;
 - reranker candidate sizes: 20 / 50 / 100;
+- FAISS index study: full FiQA (648 queries), k = 10; HNSW M=32 / efConstruction=200; IVF nlist 256/512/1024 x nprobe 8/16/32/64; 3 warmup + 5 timed passes;
 - hybrid `alpha = 0.5` (ablation grid 0.00–1.00 in steps of 0.25);
 - RRF `k = 60`;
 - deterministic tie-breaking everywhere: descending score, then ascending document id;
@@ -329,7 +382,7 @@ hybridsearch/            the Python package
   ranking/               cross-encoder reranker
   evaluation/            Precision / Recall / MRR / nDCG metrics
   indexing.py            inverted index over the toy corpus
-experiments/             runnable benchmark, ablation, analysis, and multi-dataset summary scripts
+experiments/             runnable benchmark, ablation, analysis, multi-dataset summary, and FAISS index study scripts
 tests/                   offline deterministic pytest suite
 analysis/                generated failure analysis report
 assets/figures/          generated benchmark figures
@@ -357,7 +410,7 @@ python -m pytest -q
 
 - evaluation on NFCorpus and further domains;
 - embedding model comparison;
-- FAISS Flat vs HNSW vs IVF;
+- FAISS PQ/OPQ variants and a larger ANN sweep;
 - query expansion;
 - pseudo-relevance feedback;
 - a larger-scale benchmark such as MS MARCO;

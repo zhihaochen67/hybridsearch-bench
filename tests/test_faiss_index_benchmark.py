@@ -1,4 +1,4 @@
-"""Offline tests for the FAISS index benchmark harness (Phase 14A).
+"""Offline tests for the Phase 14B FAISS index study harness.
 
 A synthetic ``FiQADataset``, a fake encoder, and a fake timer drive every
 test: no network, no real models, deterministic results. The FAISS
@@ -12,9 +12,15 @@ import pytest
 
 from experiments.benchmark import save_results
 from experiments.faiss_index_benchmark import (
+    build_grid,
+    default_grid,
     output_path_for,
     parse_args,
-    resolve_indexes,
+    parse_int_list,
+    plot_all,
+    prepare_hnsw_curve,
+    prepare_ivf_curves,
+    prepare_size_data,
     run_faiss_index_benchmark,
 )
 from hybridsearch.data.fiqa import FiQADataset
@@ -41,7 +47,7 @@ VECTORS = {
     "alpha": [2, 0, 0],
     "beta": [0, 4, 0],
     "gamma": [0, 0, 6],
-    "delta": [1, 1, 0],
+    "delta": [1, 1, 0],  # tie-free with respect to every query
     "query one": [2, 0, 0],
     "query two": [0, 4, 0],
     "query three": [3, 4, 0],
@@ -72,7 +78,17 @@ class FakeTimer:
         return current
 
 
-def run_harness(index_specs=None, k=2, max_queries=None, warmup=0, timer=None):
+TEST_GRID = [
+    ("flat", "flat", {}),
+    ("hnsw_efS8", "hnsw", {"M": 16, "efConstruction": 50, "efSearch": 8}),
+    ("hnsw_efS16", "hnsw", {"M": 16, "efConstruction": 50, "efSearch": 16}),
+    ("ivf_n4_p2", "ivf", {"nlist": 4, "nprobe": 2}),
+    ("ivf_n4_p4", "ivf", {"nlist": 4, "nprobe": 4}),
+]
+
+
+def run_harness(grid=None, k=2, max_queries=None, warmup=1, timed=2,
+                relevance=True, timer=None):
     encoder = FakeEncoder(VECTORS)
     timer = timer or FakeTimer()
     payload = run_faiss_index_benchmark(
@@ -80,155 +96,285 @@ def run_harness(index_specs=None, k=2, max_queries=None, warmup=0, timer=None):
         k=k,
         max_queries=max_queries,
         dense_model="fake/dense",
-        index_specs=index_specs,
-        warmup_queries=warmup,
+        grid=grid if grid is not None else TEST_GRID,
+        warmup_passes=warmup,
+        timed_passes=timed,
+        relevance_check=relevance,
         encoder=encoder,
         timer=timer,
     )
     return payload, encoder, timer
 
 
-DEFAULT_SPECS = [
-    ("flat", {}),
-    ("hnsw", {"M": 16}),
-    ("ivf", {"nlist": 4, "nprobe": 4}),
-]
+# --- grid construction ---
 
 
-# --- CLI parsing ---
+def test_default_grid_shape_and_order():
+    points, excluded = default_grid()
+
+    labels = [label for label, _, _ in points]
+    assert labels[0] == "flat"
+    assert labels[1:5] == ["hnsw_efS16", "hnsw_efS32", "hnsw_efS64", "hnsw_efS128"]
+    ivf_labels = labels[5:]
+    assert len(ivf_labels) == 12
+    assert ivf_labels[0] == "ivf_n256_p8"
+    assert ivf_labels[-1] == "ivf_n1024_p64"
+    assert len(points) == 1 + 4 + 12
+    assert excluded == []
 
 
-def test_resolve_indexes_parses_and_deduplicates():
-    assert resolve_indexes("flat,hnsw,ivf") == ["flat", "hnsw", "ivf"]
-    assert resolve_indexes(" flat , hnsw,flat ") == ["flat", "hnsw"]
+def test_build_grid_excludes_nprobe_above_nlist():
+    points, excluded = build_grid(
+        hnsw_m=32,
+        ef_construction=200,
+        ef_search_values=[64],
+        ivf_nlist_values=[256],
+        ivf_nprobe_values=[8, 300],
+    )
+
+    labels = [label for label, _, _ in points]
+    assert "ivf_n256_p8" in labels
+    assert "ivf_n256_p300" not in labels
+    assert excluded == [
+        {"nlist": 256, "nprobe": 300, "reason": "nprobe > nlist"}
+    ]
 
 
-@pytest.mark.parametrize("text", ["", "   ", "pizza", "flat,pizza", ",,,"])
-def test_resolve_indexes_invalid_raises(text):
+def test_build_grid_rejects_invalid_hnsw_values():
     with pytest.raises(ValueError):
-        resolve_indexes(text)
+        build_grid(hnsw_m=0, ef_construction=200, ef_search_values=[64])
 
 
-def test_parse_args_defaults_and_overrides():
-    args = parse_args(["--dataset", "fiqa", "--indexes", "flat,ivf", "--k", "5"])
-    assert args.dataset == "fiqa"
-    assert args.indexes == "flat,ivf"
-    assert args.k == 5
-
-    defaults = parse_args([])
-    assert defaults.indexes == "flat,hnsw,ivf"
-    assert defaults.hnsw_m == 32
-    assert defaults.ivf_nlist == 512
-    assert defaults.ivf_nprobe == 32
+def test_parse_int_list():
+    assert parse_int_list("16,32,64", "efSearch") == [16, 32, 64]
+    assert parse_int_list(" 8 , 16, 8 ", "nprobe") == [8, 16]
 
 
-def test_parse_args_rejects_unknown_dataset_and_index():
-    with pytest.raises(SystemExit):
-        parse_args(["--dataset", "nope"])
-    # The index list is validated later (after arg parsing) for a clear error.
+@pytest.mark.parametrize("text", ["", "   ", "abc", "0,16", "16,-2", ",,,"])
+def test_parse_int_list_invalid_raises(text):
     with pytest.raises(ValueError):
-        resolve_indexes(parse_args(["--indexes", "pizza"]).indexes)
+        parse_int_list(text, "values")
 
 
-# --- payload schema ---
+# --- payload schema and semantics ---
 
 
 def test_run_payload_schema():
-    payload, _, _ = run_harness(DEFAULT_SPECS)
+    payload, _, _ = run_harness()
 
     metadata = payload["metadata"]
     assert metadata["dataset"] == "fiqa"
     assert metadata["source"] == "BeIR/fiqa"
-    assert metadata["dense_model"] == "fake/dense"
-    assert metadata["k"] == 2
+    assert metadata["corpus_size"] == 4
     assert metadata["num_queries"] == 2
-    assert metadata["max_queries"] is None
-    assert metadata["indexes"] == [
-        {"index_type": "flat", "params": {}},
-        {"index_type": "hnsw", "params": {"M": 16}},
-        {"index_type": "ivf", "params": {"nlist": 4, "nprobe": 4}},
+    assert metadata["embedding_dimension"] == 3
+    assert metadata["k"] == 2
+    assert metadata["warmup_passes"] == 1
+    assert metadata["timed_passes"] == 2
+    assert metadata["samples_per_query"] == 2
+    assert metadata["relevance_check"] is True
+    assert metadata["grid"] == [
+        {"label": label, "index_type": index_type, "params": params}
+        for label, index_type, params in TEST_GRID
     ]
     assert isinstance(metadata["timing_methodology"], list)
 
-    assert set(payload["results"]) == {"flat", "hnsw", "ivf"}
+    assert set(payload["results"]) == {label for label, _, _ in TEST_GRID}
     for entry in payload["results"].values():
         assert set(entry) == {
-            "index_type", "params", "dimension", "n_vectors",
-            "requires_training", "trained", "build_time_s",
-            "serialized_size_bytes", "ann_recall_at_k", "latency",
+            "label", "index_type", "params", "effective_params", "dimension",
+            "n_vectors", "requires_training", "trained", "build_time_s",
+            "serialized_size_bytes", "ann_recall", "latency",
+            "qrel_ndcg_at_k",
         }
         assert entry["dimension"] == 3
         assert entry["n_vectors"] == 4
         assert entry["serialized_size_bytes"] > 0
+        assert set(entry["ann_recall"]) == {
+            "mean", "min", "queries_with_recall_1_0", "queries_with_recall_ge_0_9",
+        }
         assert set(entry["latency"]) == {
             "mean_ms", "median_ms", "p95_ms", "min_ms", "max_ms", "samples",
         }
-        assert entry["latency"]["samples"] == 2
+        assert entry["latency"]["samples"] == 2  # per-query aggregates
 
 
-def test_training_flags_per_index_type():
-    payload, _, _ = run_harness(DEFAULT_SPECS)
+def test_effective_params_match_requested():
+    payload, _, _ = run_harness()
 
-    assert payload["results"]["flat"]["requires_training"] is False
-    assert payload["results"]["hnsw"]["requires_training"] is False
-    assert payload["results"]["ivf"]["requires_training"] is True
-    assert all(entry["trained"] for entry in payload["results"].values())
-
-
-def test_ann_recall_against_flat_reference():
-    payload, _, _ = run_harness(DEFAULT_SPECS)
-
-    # flat vs flat = 1.0 by construction; the tiny full-probe indexes here
-    # are exact too, but only flat's value is asserted as a guarantee.
-    assert payload["results"]["flat"]["ann_recall_at_k"] == pytest.approx(1.0)
-    assert 0.0 <= payload["results"]["hnsw"]["ann_recall_at_k"] <= 1.0
-    assert 0.0 <= payload["results"]["ivf"]["ann_recall_at_k"] <= 1.0
+    assert payload["results"]["flat"]["effective_params"] == {}
+    assert payload["results"]["hnsw_efS8"]["effective_params"]["efSearch"] == 8
+    assert payload["results"]["hnsw_efS16"]["effective_params"]["efSearch"] == 16
+    assert payload["results"]["ivf_n4_p2"]["effective_params"]["nprobe"] == 2
+    assert payload["results"]["ivf_n4_p4"]["effective_params"]["nprobe"] == 4
+    assert payload["results"]["ivf_n4_p2"]["effective_params"]["nlist"] == 4
 
 
-def test_flat_reference_built_when_not_requested():
-    payload, _, _ = run_harness([("ivf", {"nlist": 4, "nprobe": 4})])
+def test_flat_recall_is_exactly_one():
+    payload, _, _ = run_harness()
 
-    assert set(payload["results"]) == {"ivf"}
-    # Recall is still measured against a hidden exact Flat reference.
-    assert payload["results"]["ivf"]["ann_recall_at_k"] == pytest.approx(1.0)
-
-
-# --- timing semantics ---
-
-
-def test_build_time_and_latency_use_fake_timer():
-    payload, _, timer = run_harness(DEFAULT_SPECS)
-
-    # One build per index: each build = exactly two timer calls (5 ms).
-    for entry in payload["results"].values():
-        assert entry["build_time_s"] == pytest.approx(0.005)
-        # Two timed queries at 5 ms each.
-        assert entry["latency"]["mean_ms"] == pytest.approx(5.0)
-        assert entry["latency"]["p95_ms"] == pytest.approx(5.0)
-
-    # 3 builds * 2 calls + 3 indexes * 2 queries * 2 calls = 18 timer calls.
-    assert timer.calls == 18
+    flat = payload["results"]["flat"]
+    assert flat["ann_recall"]["mean"] == pytest.approx(1.0)
+    assert flat["ann_recall"]["min"] == pytest.approx(1.0)
+    assert flat["ann_recall"]["queries_with_recall_1_0"] == 2
+    assert flat["ann_recall"]["queries_with_recall_ge_0_9"] == 2
 
 
-def test_encoding_is_excluded_from_timing():
-    payload, encoder, _ = run_harness(DEFAULT_SPECS)
+def test_ann_recall_distribution_stats():
+    payload, _, _ = run_harness()
 
-    # Encoder ran exactly twice: corpus once, all queries once — before the
-    # first timer call, so its work never lands inside a timed region.
+    # Full-probe IVF and the tiny exact HNSW graphs are exact here.
+    assert payload["results"]["ivf_n4_p4"]["ann_recall"]["mean"] == pytest.approx(1.0)
+    assert payload["results"]["hnsw_efS8"]["ann_recall"]["mean"] == pytest.approx(1.0)
+    # Partial probe stays within [0, 1] and reports distribution stats.
+    partial = payload["results"]["ivf_n4_p2"]["ann_recall"]
+    assert 0.0 <= partial["mean"] <= 1.0
+    assert 0.0 <= partial["min"] <= partial["mean"]
+    assert partial["queries_with_recall_1_0"] <= 2
+    assert partial["queries_with_recall_ge_0_9"] <= 2
+
+
+def test_builds_are_grouped_by_build_configuration():
+    payload, _, timer = run_harness()
+
+    # Same index for both efSearch values, and for both nprobe values.
+    assert payload["results"]["hnsw_efS8"]["build_time_s"] == pytest.approx(
+        payload["results"]["hnsw_efS16"]["build_time_s"]
+    )
+    assert payload["results"]["ivf_n4_p2"]["build_time_s"] == pytest.approx(
+        payload["results"]["ivf_n4_p4"]["build_time_s"]
+    )
+    assert payload["results"]["ivf_n4_p2"]["serialized_size_bytes"] == (
+        payload["results"]["ivf_n4_p4"]["serialized_size_bytes"]
+    )
+
+    # 3 distinct builds (flat, hnsw, ivf) x 2 timer calls each = 6; plus
+    # 5 configs x 2 queries x 2 timed passes x 2 calls = 40 -> 46 total.
+    assert timer.calls == 46
+
+
+def test_encoding_is_excluded_from_all_timing():
+    payload, encoder, _ = run_harness()
+
     assert encoder.calls == [
         ["alpha", "beta", "gamma", "delta"],
         ["query one", "query two"],
     ]
     for entry in payload["results"].values():
         assert entry["build_time_s"] == pytest.approx(0.005)
+        assert entry["latency"]["mean_ms"] == pytest.approx(5.0)
 
 
-def test_warmup_queries_are_untimed():
-    payload, _, timer = run_harness(DEFAULT_SPECS, warmup=1)
+def test_per_query_latency_averages_timed_passes():
+    payload, _, timer = run_harness(timed=3)
 
-    # Warmup searches add no timer calls: same 18 calls as without warmup.
-    assert timer.calls == 18
-    assert payload["metadata"]["warmup_queries"] == 1
+    # 3 timed passes per query: per-query mean = 5 ms (three 5 ms samples).
+    for entry in payload["results"].values():
+        assert entry["latency"]["mean_ms"] == pytest.approx(5.0)
+        assert entry["latency"]["samples"] == 2  # per-query aggregates
+
+    # 3 builds * 2 + 5 configs * 2 queries * 3 passes * 2 = 66 timer calls.
+    assert timer.calls == 66
+
+
+def test_warmup_passes_do_not_touch_timer():
+    payload, _, timer = run_harness(warmup=2, timed=1)
+
+    assert payload["metadata"]["warmup_passes"] == 2
+    # 3 builds * 2 + 5 configs * 2 queries * 1 pass * 2 = 26 timer calls.
+    assert timer.calls == 26
+
+
+def test_relevance_diagnostic_optional():
+    with_relevance, _, _ = run_harness(relevance=True)
+    without_relevance, _, _ = run_harness(relevance=False)
+
+    assert with_relevance["metadata"]["relevance_check"] is True
+    assert with_relevance["results"]["flat"]["qrel_ndcg_at_k"] == pytest.approx(1.0)
+    assert without_relevance["results"]["flat"]["qrel_ndcg_at_k"] is None
+
+
+def test_grid_preflight_rejects_ivf_nlist_above_corpus():
+    bad_grid = [("ivf_big", "ivf", {"nlist": 16, "nprobe": 4})]
+
+    with pytest.raises(ValueError, match="training"):
+        run_harness(grid=bad_grid)
+
+
+def test_harness_rejects_invalid_pass_counts():
+    with pytest.raises(ValueError):
+        run_harness(timed=0)
+    with pytest.raises(ValueError):
+        run_harness(warmup=-1)
+
+
+# --- figure data preparation ---
+
+
+def test_prepare_hnsw_curve_reads_payload():
+    payload, _, _ = run_harness()
+
+    ef_searches, recalls, latencies = prepare_hnsw_curve(payload)
+
+    assert ef_searches == [8, 16]
+    assert recalls == [
+        payload["results"]["hnsw_efS8"]["ann_recall"]["mean"],
+        payload["results"]["hnsw_efS16"]["ann_recall"]["mean"],
+    ]
+    assert latencies == pytest.approx([5.0, 5.0])
+
+    # A changed payload produces a changed curve (nothing hard-coded).
+    modified = json.loads(json.dumps(payload))
+    modified["results"]["hnsw_efS8"]["ann_recall"]["mean"] = 0.5
+    _, modified_recalls, _ = prepare_hnsw_curve(modified)
+    assert modified_recalls[0] == pytest.approx(0.5)
+    assert modified_recalls != recalls
+
+
+def test_prepare_ivf_curves_groups_by_nlist():
+    grid = [
+        ("flat", "flat", {}),
+        ("ivf_n2_p2", "ivf", {"nlist": 2, "nprobe": 2}),
+        ("ivf_n4_p2", "ivf", {"nlist": 4, "nprobe": 2}),
+        ("ivf_n4_p4", "ivf", {"nlist": 4, "nprobe": 4}),
+    ]
+    payload, _, _ = run_harness(grid=grid)
+
+    curves = prepare_ivf_curves(payload)
+
+    assert set(curves) == {2, 4}
+    assert curves[2][0] == [2]
+    assert curves[4][0] == [2, 4]
+    for nprobes, recalls, latencies in curves.values():
+        assert len(nprobes) == len(recalls) == len(latencies)
+
+
+def test_prepare_size_data_reads_payload():
+    payload, _, _ = run_harness()
+
+    labels, sizes = prepare_size_data(payload)
+
+    assert labels == [label for label, _, _ in TEST_GRID]
+    assert all(size > 0 for size in sizes)
+    assert sizes[0] == pytest.approx(
+        payload["results"]["flat"]["serialized_size_bytes"] / 1e6
+    )
+
+
+def test_plot_all_writes_expected_pngs(tmp_path):
+    payload, _, _ = run_harness()
+
+    paths = plot_all(payload, output_dir=tmp_path)
+
+    assert {path.name for path in paths} == {
+        "faiss_recall_latency.png",
+        "faiss_index_size.png",
+        "faiss_hnsw_efsearch.png",
+        "faiss_ivf_nprobe.png",
+    }
+    for path in paths:
+        assert path.exists()
+        assert path.stat().st_size > 0
 
 
 # --- output paths + JSON round trip ---
@@ -240,31 +386,51 @@ def test_output_paths_dataset_scoped():
         output_path_for("fiqa", 20)
         == "outputs/fiqa_faiss_index_benchmark_smoke20.json"
     )
-    assert (
-        output_path_for("scifact", 20)
-        == "outputs/scifact_faiss_index_benchmark_smoke20.json"
-    )
     assert output_path_for("fiqa") != output_path_for("scifact")
     assert output_path_for("fiqa", 20) != output_path_for("fiqa")
 
 
 def test_output_json_schema(tmp_path):
-    payload, _, _ = run_harness(DEFAULT_SPECS)
+    payload, _, _ = run_harness()
     path = tmp_path / "faiss_index_benchmark.json"
 
     save_results(payload, path)
 
     loaded = json.loads(path.read_text(encoding="utf-8"))
     assert set(loaded) == {"metadata", "results"}
-    assert set(loaded["results"]) == {"flat", "hnsw", "ivf"}
+    assert set(loaded["results"]) == {"flat", "hnsw_efS8", "hnsw_efS16", "ivf_n4_p2", "ivf_n4_p4"}
     assert loaded["metadata"]["num_queries"] == 2
+
+
+# --- CLI ---
+
+
+def test_parse_args_defaults_and_overrides():
+    defaults = parse_args([])
+    assert defaults.hnsw_ef_search == "16,32,64,128"
+    assert defaults.ivf_nlist == "256,512,1024"
+    assert defaults.ivf_nprobe == "8,16,32,64"
+    assert defaults.warmup_passes == 3
+    assert defaults.timed_passes == 5
+
+    args = parse_args(
+        ["--dataset", "fiqa", "--timed-passes", "2", "--skip-relevance"]
+    )
+    assert args.dataset == "fiqa"
+    assert args.timed_passes == 2
+    assert args.skip_relevance is True
+
+
+def test_parse_args_rejects_unknown_dataset():
+    with pytest.raises(SystemExit):
+        parse_args(["--dataset", "nope"])
 
 
 # --- determinism ---
 
 
 def test_harness_is_deterministic():
-    first, _, _ = run_harness(DEFAULT_SPECS)
-    second, _, _ = run_harness(DEFAULT_SPECS)
+    first, _, _ = run_harness()
+    second, _, _ = run_harness()
 
     assert first == second
