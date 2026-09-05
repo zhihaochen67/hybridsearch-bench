@@ -1,4 +1,4 @@
-"""Full FAISS index study (Phase 14B): Flat / HNSW / IVF tradeoffs.
+"""Full FAISS index study: Flat / HNSW / IVF tradeoffs.
 
     python experiments/faiss_index_benchmark.py --dataset fiqa
 
@@ -147,7 +147,7 @@ def build_grid(
 
 
 def default_grid():
-    """The Phase 14B default grid."""
+    """The default grid."""
     return build_grid(
         HNSW_DEFAULT_M,
         HNSW_DEFAULT_EF_CONSTRUCTION,
@@ -231,7 +231,7 @@ def run_faiss_index_benchmark(
     """Run the full index grid and return a JSON-serializable payload.
 
     ``grid`` is a list of ``(label, index_type, params)`` points (default:
-    the Phase 14B grid). ``encoder`` and ``timer`` exist for offline tests.
+    the study grid). ``encoder`` and ``timer`` exist for offline tests.
     """
     if grid is None:
         grid, excluded = default_grid()
@@ -389,7 +389,7 @@ def run_faiss_index_benchmark(
                 "per-query latency covers FAISS index.search on precomputed query embeddings; per-query latency = mean over timed passes; summary aggregates per-query means",
                 "warmup passes are executed untimed",
                 "ann_recall@k = mean over queries of |ANN top-k INTERSECT Flat top-k| / k (approximation vs exact Flat, not qrel relevance Recall@k)",
-                "qrel_ndcg_at_k is a secondary relevance diagnostic on the top-k ids, not the primary Phase 14 metric",
+                "qrel_ndcg_at_k is a secondary relevance diagnostic on the top-k ids, not the primary metric",
                 "deterministic inputs: fixed query order, identical embeddings across configurations, FAISS default clustering seed",
             ],
         },
@@ -657,7 +657,7 @@ def plot_ivf_nprobe(payload: dict, output_dir="assets/figures") -> Path:
 
 
 def plot_all(payload: dict, output_dir="assets/figures") -> list:
-    """Generate all Phase 14B figures from the actual payload."""
+    """Generate all figures from the actual payload."""
     return [
         plot_recall_latency(payload, output_dir),
         plot_index_size(payload, output_dir),

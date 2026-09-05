@@ -6,7 +6,7 @@
         --candidate-k 50 --max-queries 20
 
 Builds the BM25 and dense indices exactly once per run, evaluates every
-query that has qrels with the Phase 5 metrics, prints a table of
+query that has qrels with the project metrics (precision, recall, MRR, nDCG), prints a table of
 arithmetic means across queries, and saves the payload as JSON under
 ``outputs/``. Model/index construction time is not part of the measured
 quality numbers (latency benchmarking comes later).

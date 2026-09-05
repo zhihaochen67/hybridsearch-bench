@@ -132,7 +132,7 @@ On SciFact, **Hybrid Weighted + rerank@20 is the strongest tested configuration 
 
 ## Multi-Dataset Results
 
-Phase 13 adds FiQA as a second real dataset: SciFact stays the primary deep-analysis dataset, while FiQA checks whether the SciFact conclusions generalize to a different domain (financial Q&A). Both datasets use the identical methods, defaults, and evaluation protocol.
+FiQA is the second real dataset: SciFact stays the primary deep-analysis dataset, while FiQA checks whether the SciFact conclusions generalize to a different domain (financial Q&A). Both datasets use the identical methods, defaults, and evaluation protocol.
 
 Retrieval-only comparison, full runs (`k = 10`, `alpha = 0.5`, RRF `k = 60`, hybrid `candidate_k = 50`):
 
@@ -176,9 +176,9 @@ Cross-dataset observations (actual data only, no claims of generality):
 - **The best alpha is 0.25 on both datasets, but the curve shapes differ**: on FiQA quality collapses steeply toward BM25-heavy fusion (0.1631 at `alpha = 1.0` vs 0.5694 on SciFact), so FiQA depends far more on the dense signal.
 - **RRF behaves consistently relative to weighted fusion**: weighted nDCG@10 exceeds RRF on both datasets (0.6771 vs 0.6522; 0.3420 vs 0.3150).
 - **Reranking improves both datasets** (canonical pool-50 + rerank@20 configuration), and the nDCG gain is relatively larger on FiQA (+0.0364, ~10.6%) than on SciFact (+0.0227, ~3.4%).
-- **Failure patterns differ qualitatively**: 193/648 FiQA queries (29.8%) are missed by both first-stage retrievers (Recall@10 = 0) vs 37/300 (12.3%) on SciFact; per-query, Dense beats BM25 354 vs 70 times on FiQA (92 vs 54 on SciFact), so BM25 is much weaker on FiQA than on SciFact.
+- **Failure patterns differ qualitatively**: on SciFact, 37/300 queries (12.3%) are missed by every method (Recall@10 = 0) and per-query Dense beats BM25 92 vs 54 times (from `outputs/scifact_failure_analysis.json`); FiQA's aggregate gap is far larger (BM25 nDCG@10 0.1631 vs Dense 0.3687), so BM25 is much weaker on FiQA than on SciFact (0.1631 vs 0.5694). Per-query failure counts are tracked for SciFact only.
 
-All numbers come from the generated artifacts under `outputs/` (`scifact_*` / `fiqa_*`); the cross-dataset table and both figures are produced by `python experiments/multidataset_summary.py` and saved to `outputs/multidataset_summary.json`.
+The benchmark numbers come from the generated artifacts under `outputs/` (`scifact_*` / `fiqa_*`); the cross-dataset table and both figures are produced by `python experiments/multidataset_summary.py` and saved to `outputs/multidataset_summary.json`.
 
 ## Fusion Alpha Ablation
 
@@ -239,7 +239,7 @@ Careful interpretation:
 
 ## FAISS Index Study
 
-Beyond the Flat exact-search index used by every benchmark so far, Phase 14 compares FAISS index configurations on the full FiQA set (57,638 documents, 648 judged queries, `k = 10`):
+Beyond the Flat exact-search index used by every retrieval benchmark, the FAISS index study compares index configurations on the full FiQA set (57,638 documents, 648 judged queries, `k = 10`):
 
 - **Flat** (`IndexFlatIP`) is the exact nearest-neighbor reference — ANN Recall@10 = 1.0 by construction;
 - **HNSW** (`IndexHNSWFlat`, inner product over L2-normalized embeddings) with M = 32, efConstruction = 200, efSearch in {16, 32, 64, 128};
@@ -310,7 +310,7 @@ The full per-query report separates **observations** from **hypotheses** and cov
 ## Installation
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/zhihaochen67/hybridsearch-bench.git
 cd hybridsearch-bench
 
 python -m venv .venv
@@ -348,14 +348,14 @@ python experiments/fusion_ablation.py     # alpha grid + figures
 python experiments/latency_benchmark.py   # per-query retrieval latency
 python experiments/reranker_benchmark.py  # reranking quality
 python experiments/quality_latency.py     # quality vs latency, candidate sizes
-python experiments/faiss_index_benchmark.py  # FAISS index comparison (Flat/HNSW/IVF)
+python experiments/faiss_index_benchmark.py --dataset fiqa  # FAISS index comparison (Flat/HNSW/IVF)
 python experiments/failure_analysis.py    # per-query failure report (SciFact)
 python experiments/multidataset_summary.py  # cross-dataset table + figures
     --benchmarks outputs/scifact_reranker_benchmark.json outputs/fiqa_benchmark.json \
     --ablations outputs/scifact_fusion_ablation.json outputs/fiqa_fusion_ablation.json
 ```
 
-Use `--max-queries 20` for a fast smoke run. Full runs evaluate all qrels queries — 300 on SciFact, 648 on FiQA — and save dataset-scoped JSON under `outputs/`; the full fusion and quality runs also (re)generate the figures in `assets/figures/`. The experiment scripts work without installation too — they add the repository root to `sys.path` — but `pip install -e .` is the supported setup.
+Use `--max-queries 20` for a fast smoke run. Full runs evaluate all qrels queries — 300 on SciFact, 648 on FiQA — and save dataset-scoped JSON under `outputs/`; the full fusion, quality/latency, and FAISS study runs also (re)generate the figures in `assets/figures/`. The experiment scripts work without installation too — they add the repository root to `sys.path` — but `pip install -e .` is the supported setup.
 
 ## Reproducibility
 
@@ -394,15 +394,15 @@ assets/figures/          generated benchmark figures
 python -m pytest -q
 ```
 
-331 tests pass, fully offline (no model or dataset downloads).
+407 tests pass, fully offline (no model or dataset downloads).
 
 ## Limitations
 
 - two datasets so far — SciFact (primary deep-analysis dataset) and FiQA (cross-dataset robustness validation); other domains remain untested;
-- the dense and reranker models are pretrained general models, not fine-tuned on SciFact;
+- the dense and reranker models are pretrained general models, not fine-tuned on either dataset;
 - latency is a single-machine CPU/WSL measurement;
 - candidate-size conclusions may differ with a different model, dataset, or hardware;
-- no large-scale ANN benchmark (FAISS flat index only);
+- the FAISS ANN coverage is the FiQA Flat/HNSW/IVF study above — no PQ/OPQ variants, no GPU, and no larger ANN sweep;
 - no trained retriever or reranker;
 - no distributed search engine.
 
@@ -418,4 +418,4 @@ python -m pytest -q
 
 ## License
 
-MIT — see [LICENSE](LICENSE). This project uses third-party datasets and models (SciFact via BEIR, sentence-transformers, FAISS); those assets are acknowledged by name and remain under their respective licenses.
+MIT — see [LICENSE](LICENSE). This project uses third-party datasets and models (SciFact and FiQA via BEIR, sentence-transformers, FAISS); those assets are acknowledged by name and remain under their respective licenses.
