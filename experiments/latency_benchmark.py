@@ -11,7 +11,9 @@ loading all happen *before* any timing. Each query is timed once with
 ``time.perf_counter()`` around a single ``search`` call, after a small
 per-method warmup. Reports mean, median, and p95 latency per query across
 all measured test queries of the selected dataset and saves the payload
-as JSON under ``outputs/<dataset>_latency.json``.
+as JSON under ``outputs/<dataset>_latency.json``. Subset runs use
+``outputs/<dataset>_latency_smokeN.json`` so they cannot overwrite the
+full-run artifact.
 """
 
 from __future__ import annotations
@@ -170,9 +172,12 @@ def format_latency_table(payload: dict) -> str:
     return "\n".join(lines)
 
 
-def output_path_for(dataset_name: str) -> str:
-    """Dataset-specific JSON path for the latency payload."""
-    return f"outputs/{dataset_name}_latency.json"
+def output_path_for(
+    dataset_name: str, max_queries: int | None = None
+) -> str:
+    """Dataset-specific JSON path; smoke runs get their own file."""
+    suffix = f"_smoke{max_queries}" if max_queries is not None else ""
+    return f"outputs/{dataset_name}_latency{suffix}.json"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -247,7 +252,7 @@ def main(argv=None) -> None:
     print()
     print(format_latency_table(payload))
 
-    output = args.output or output_path_for(args.dataset)
+    output = args.output or output_path_for(args.dataset, args.max_queries)
     save_results(payload, output)
     print(f"\nSaved results to {output}")
 

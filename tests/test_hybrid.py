@@ -147,28 +147,70 @@ def test_weighted_result_fields(hybrid):
     }
 
 
-def test_alpha_one_is_sparse_only_ordering(sparse, dense):
+def test_alpha_one_reproduces_sparse_ranking(sparse, dense):
     retriever = HybridRetriever(sparse, dense, method="weighted", alpha=1.0)
 
     results = retriever.search("q", top_k=5)
 
-    assert [result["id"] for result in results] == ["A", "B", "C", "D", "E"]
+    assert [result["id"] for result in results] == ["A", "B", "C", "D"]
     by_id = {result["id"]: result for result in results}
     assert by_id["A"]["score"] == pytest.approx(1.0)
     assert by_id["B"]["score"] == pytest.approx(5.5 / 8.5)
-    assert by_id["E"]["score"] == pytest.approx(0.0)
+    assert by_id["D"]["score"] == pytest.approx(0.0)
+    assert sparse.calls == [("q", 5)]
+    assert dense.calls == [("q", 50)]
 
 
-def test_alpha_zero_is_dense_only_ordering(sparse, dense):
+def test_alpha_zero_reproduces_dense_ranking(sparse, dense):
     retriever = HybridRetriever(sparse, dense, method="weighted", alpha=0.0)
 
     results = retriever.search("q", top_k=5)
 
-    assert [result["id"] for result in results] == ["D", "C", "B", "A", "E"]
+    assert [result["id"] for result in results] == ["D", "C", "B", "E"]
     by_id = {result["id"]: result for result in results}
     assert by_id["D"]["score"] == pytest.approx(1.0)
     assert by_id["C"]["score"] == pytest.approx(0.45 / 0.59)
-    assert by_id["A"]["score"] == pytest.approx(0.0)
+    assert by_id["E"]["score"] == pytest.approx(0.0)
+    assert sparse.calls == [("q", 50)]
+    assert dense.calls == [("q", 5)]
+
+
+@pytest.mark.parametrize(
+    "alpha, expected_ids",
+    [
+        (1.0, ["S1", "Z"]),
+        (0.0, ["D1", "Y"]),
+    ],
+)
+def test_weighted_endpoints_exclude_disjoint_candidates_at_zero_boundary(
+    alpha, expected_ids
+):
+    sparse = StubRetriever(
+        {
+            "q": [
+                {"id": "S1", "text": "sparse leader", "score": 9.0},
+                {"id": "Z", "text": "sparse boundary", "score": 0.5},
+            ]
+        }
+    )
+    dense = StubRetriever(
+        {
+            "q": [
+                {"id": "D1", "text": "dense leader", "score": 0.99},
+                {"id": "Y", "text": "dense boundary", "score": -0.25},
+            ]
+        }
+    )
+    retriever = HybridRetriever(
+        sparse, dense, method="weighted", alpha=alpha, candidate_k=2
+    )
+
+    results = retriever.search("q", top_k=2)
+
+    assert [result["id"] for result in results] == expected_ids
+    # The active list's minimum normalizes to zero, but an inactive-list
+    # candidate with the same fused score must not displace it by id.
+    assert results[-1]["score"] == pytest.approx(0.0)
 
 
 # --- RRF through the hybrid retriever ---

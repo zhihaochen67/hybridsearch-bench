@@ -10,9 +10,11 @@ import json
 
 import pytest
 
+import experiments.quality_latency as quality_latency
 from experiments.benchmark import save_results
 from experiments.quality_latency import (
     CANDIDATE_SIZES_DEFAULT,
+    build_methods,
     output_path_for,
     parse_candidate_sizes,
     plot_all,
@@ -100,6 +102,8 @@ class FakeTimer:
 
 
 def make_methods(k, sizes, retriever, reranker):
+    upstream_k = max(sizes)
+
     methods = {
         "Base": lambda q: [r["id"] for r in retriever.search(q, top_k=k)],
     }
@@ -108,7 +112,7 @@ def make_methods(k, sizes, retriever, reranker):
             return lambda q: [
                 r["id"]
                 for r in reranker.rerank(
-                    q, retriever.search(q, top_k=size), top_k=k
+                    q, retriever.search(q, top_k=upstream_k)[:size], top_k=k
                 )
             ]
 
@@ -173,7 +177,7 @@ def test_validate_candidate_sizes_rejects_empty_and_non_positive():
 # --- candidate fetching semantics ---
 
 
-def test_rerank_methods_fetch_exactly_their_candidate_size():
+def test_rerank_methods_pass_exact_prefix_for_each_candidate_size():
     created = []
     run_study(sizes=(2, 3, 4), warmup=0, created=created)
     reranker = created[0][1]
@@ -187,6 +191,87 @@ def test_rerank_methods_fetch_exactly_their_candidate_size():
     assert by_size[2] == ("query one", ["C4", "C3"])
     assert by_size[3] == ("query one", ["C4", "C3", "C2"])
     assert by_size[4] == ("query one", ["C4", "C3", "C2", "C1"])
+
+
+def test_real_method_builder_uses_one_fixed_upstream_ranking(monkeypatch):
+    sparse = FakeRetriever(
+        {
+            "query": [
+                {"id": "S3", "text": "sparse three", "score": 3.0},
+                {"id": "S2", "text": "sparse two", "score": 2.0},
+                {"id": "S1", "text": "sparse one", "score": 1.0},
+            ]
+        }
+    )
+    dense = FakeRetriever(
+        {
+            "query": [
+                {"id": "D3", "text": "dense three", "score": 6.0},
+                {"id": "D2", "text": "dense two", "score": 4.0},
+                {"id": "D1", "text": "dense one", "score": 2.0},
+            ]
+        }
+    )
+    reranker = FakeReranker(
+        {doc_id: 0.0 for doc_id in ("S3", "S2", "S1", "D3", "D2", "D1")}
+    )
+
+    monkeypatch.setattr(quality_latency, "BM25", lambda corpus: sparse)
+    monkeypatch.setattr(
+        quality_latency,
+        "DenseRetriever",
+        lambda corpus, model_name: dense,
+    )
+    monkeypatch.setattr(
+        quality_latency,
+        "CrossEncoderReranker",
+        lambda model_name: reranker,
+    )
+
+    methods = build_methods(
+        corpus=[],
+        k=2,
+        candidate_sizes=[2, 4, 6],
+        alpha=0.5,
+        dense_model="fake/dense",
+        reranker_model="fake/reranker",
+        hybrid_candidate_k=3,
+    )
+
+    hybrid_names = [
+        "Hybrid Weighted",
+        "Hybrid + rerank@2",
+        "Hybrid + rerank@4",
+        "Hybrid + rerank@6",
+    ]
+    for name in hybrid_names:
+        methods[name]("query")
+
+    # Every hybrid/rerank variant fetched the same depth from both sources.
+    assert sparse.calls == [("query", 3)] * len(hybrid_names)
+    assert dense.calls == [("query", 3)] * len(hybrid_names)
+
+    # Every candidate list is a prefix of one identical fused ranking.  In
+    # particular, rerank@6 does not raise either per-source depth above 3.
+    full_ranking = ["D3", "S3", "D2", "S2", "D1", "S1"]
+    calls_by_size = {
+        len(candidate_ids): candidate_ids
+        for _, candidate_ids, final_k in reranker.calls
+        if final_k == 2
+    }
+    assert calls_by_size == {
+        2: full_ranking[:2],
+        4: full_ranking[:4],
+        6: full_ranking,
+    }
+
+
+def test_metadata_records_fixed_upstream_candidate_depth():
+    payload = run_study(sizes=(2, 3, 4), warmup=1)
+
+    methodology = " ".join(payload["metadata"]["methodology"])
+    assert "reranker size slices the same weighted-fusion ranking" in methodology
+    assert "each fetch exactly 4 candidates" in methodology
 
 
 def test_final_evaluation_uses_reranked_top_k_ids():
@@ -269,6 +354,23 @@ def test_warmup_calls_are_excluded_from_latency_samples():
     assert entry["latency"]["samples"] == 2  # two queries, not three
 
 
+def test_zero_warmup_metadata_includes_lazy_model_loading():
+    payload = run_study(sizes=(4,), warmup=0)
+
+    assert payload["metadata"]["model_loading_excluded"] is False
+    methodology = " ".join(payload["metadata"]["methodology"])
+    assert "lazy cross-encoder model loading is included" in methodology
+
+
+def test_positive_warmup_metadata_excludes_model_loading():
+    payload = run_study(sizes=(4,), warmup=1)
+
+    assert payload["metadata"]["model_loading_excluded"] is True
+    methodology = " ".join(payload["metadata"]["methodology"])
+    assert "model loading are excluded" in methodology
+    assert "model loading is included" not in methodology
+
+
 def test_run_method_returns_quality_and_latency():
     retriever = FakeRetriever(RETRIEVER_RESULTS)
     reranker = FakeReranker(RERANKER_SCORES)
@@ -312,7 +414,7 @@ def test_output_json_schema(tmp_path):
         "dataset", "source", "dense_model", "reranker_model", "k",
         "candidate_sizes", "alpha", "hybrid_candidate_k", "num_queries",
         "max_queries", "warmup_queries", "timer", "timing_passes",
-        "methodology",
+        "model_loading_excluded", "methodology",
     }
     assert loaded["metadata"]["candidate_sizes"] == [2, 3, 4]
     assert loaded["metadata"]["num_queries"] == 2

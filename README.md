@@ -164,8 +164,8 @@ Reranking comparison — canonical configuration: Hybrid Weighted with hybrid fu
 
 | Dataset | Hybrid Weighted nDCG@10 | + rerank@20 nDCG@10 | Mean rerank latency |
 |---|---:|---:|---:|
-| SciFact | 0.6771 | 0.6998 | 673.66 ms |
-| FiQA | 0.3420 | 0.3784 | 793.10 ms |
+| SciFact | 0.6771 | 0.6998 | 626.40 ms |
+| FiQA | 0.3420 | 0.3784 | 812.56 ms |
 
 **Reranker candidate-pool semantics.** `experiments/reranker_benchmark.py` couples one knob (`--candidate-k` = hybrid fusion pool AND reranker pool), while `experiments/quality_latency.py` decouples them (`--hybrid-candidate-k` 50 + `--candidate-sizes`). The full FiQA reranker-benchmark payload therefore used pool 20 for both stages: Hybrid Weighted 0.3390 -> reranked 0.3735 nDCG@10, versus 0.3420 -> 0.3784 with the canonical pool-50 fusion in the table above. That difference is expected — weighted fusion min-max-normalizes over the fetched pool (20+20 vs 50+50 documents), so the fused order, and hence the 20 candidates handed to the reranker, differs. Every reranker claim in this README uses the canonical pool-50 + rerank@20 configuration.
 
@@ -207,24 +207,24 @@ Key interpretation:
 
 ## Quality vs Latency
 
-Quality and query-time latency on the same 300 SciFact queries (rerank@N = hybrid top-N candidates reranked to the final top-10):
+Quality and query-time latency on the same 300 SciFact queries. All rerank@N rows use the same upstream retrieval/fusion configuration: BM25 and Dense each fetch exactly 50 candidates, the same per-query normalization and weighted fusion produce the upstream ranking, and only the first N candidates from that ranking are passed to the cross-encoder and reranked to the final top-10. The rows therefore isolate the reranker candidate-prefix size rather than changing retrieval depth or fusion normalization.
 
 | Method | Precision@10 | Recall@10 | MRR@10 | nDCG@10 | Mean ms | Median ms | P95 ms |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| BM25 | 0.0760 | 0.6803 | 0.5381 | 0.5694 | 12.60 | 11.83 | 22.04 |
-| Dense | 0.0883 | 0.7833 | 0.6047 | 0.6451 | 6.05 | 5.68 | 8.70 |
-| Hybrid Weighted | 0.0907 | 0.8033 | 0.6413 | 0.6771 | 26.61 | 24.69 | 41.80 |
-| Hybrid + rerank@20 | 0.0937 | 0.8356 | 0.6664 | 0.6998 | 673.66 | 684.57 | 779.27 |
-| Hybrid + rerank@50 | 0.0927 | 0.8239 | 0.6661 | 0.6965 | 1506.70 | 1513.69 | 1739.88 |
-| Hybrid + rerank@100 | 0.0910 | 0.8072 | 0.6587 | 0.6884 | 2945.58 | 2902.05 | 3398.40 |
+| BM25 | 0.0760 | 0.6803 | 0.5381 | 0.5694 | 11.37 | 10.72 | 19.88 |
+| Dense | 0.0883 | 0.7833 | 0.6047 | 0.6451 | 5.25 | 5.07 | 7.76 |
+| Hybrid Weighted | 0.0907 | 0.8033 | 0.6413 | 0.6771 | 20.98 | 20.18 | 31.33 |
+| Hybrid + rerank@20 | 0.0937 | 0.8356 | 0.6664 | 0.6998 | 626.40 | 636.60 | 679.21 |
+| Hybrid + rerank@50 | 0.0927 | 0.8239 | 0.6661 | 0.6965 | 1326.63 | 1316.87 | 1483.05 |
+| Hybrid + rerank@100 | 0.0910 | 0.8072 | 0.6589 | 0.6886 | 2225.72 | 2231.82 | 2604.04 |
 
 Timing methodology:
 
-- single-machine CPU / WSL environment;
+- single-machine CPU / WSL measurements of these reference implementations; BM25 here is an in-process Python implementation, not a production search engine;
 - query-time only — dataset loading, index construction, dense corpus encoding, FAISS build, and model loading are excluded;
 - measured with `time.perf_counter`;
 - 3 untimed warmup queries per method, then one timed pass (samples = number of queries);
-- absolute latency is environment-dependent — compare relative magnitudes, not the absolute values.
+- absolute latency and differences across runs are machine- and environment-dependent — compare relative magnitudes within a run, not the absolute values as portable performance guarantees.
 
 ![Quality vs latency](assets/figures/quality_latency_ndcg.png)
 
@@ -233,7 +233,7 @@ Timing methodology:
 Careful interpretation:
 
 - rerank@20 gives the best tested quality among candidate sizes 20 / 50 / 100;
-- reranking produces a substantial quality gain but a very large CPU latency cost (about 25x hybrid retrieval at rerank@20, growing to roughly 110x at rerank@100);
+- reranking produces a substantial quality gain but a very large CPU latency cost in this run (about 30x hybrid retrieval at rerank@20, growing to roughly 106x at rerank@100);
 - larger candidate pools did **not** improve quality in this setup;
 - one possible explanation is that the cross-encoder's scores on out-of-domain scientific claims are noisy and reorder near-tied candidates — this is a hypothesis, not a demonstrated cause.
 
@@ -249,23 +249,23 @@ ANN Recall@10 = |ANN top-10 ∩ Flat top-10| / 10 per query, macro-averaged over
 
 | Config | ANN R@10 | Queries ≥0.9 | Build s | Size MB | Mean ms | qrel nDCG@10 |
 |---|---:|---:|---:|---:|---:|---:|
-| flat | 1.0000 | 648 | 0.068 | 88.53 | 1.997 | 0.3687 |
-| hnsw efS16 | 0.9366 | 552 | 2.577 | 104.22 | 0.058 | 0.3509 |
-| hnsw efS32 | 0.9792 | 627 | 2.577 | 104.22 | 0.094 | 0.3616 |
-| hnsw efS64 | 0.9941 | 643 | 2.577 | 104.22 | 0.156 | 0.3642 |
-| hnsw efS128 | 0.9983 | 646 | 2.577 | 104.22 | 0.284 | 0.3671 |
-| ivf n256 p8 | 0.8906 | 477 | 1.169 | 89.39 | 0.129 | 0.3358 |
-| ivf n256 p16 | 0.9468 | 561 | 1.169 | 89.39 | 0.238 | 0.3524 |
-| ivf n256 p32 | 0.9764 | 612 | 1.169 | 89.39 | 0.472 | 0.3596 |
-| ivf n256 p64 | 0.9923 | 642 | 1.169 | 89.39 | 0.888 | 0.3663 |
-| ivf n512 p8 | 0.8611 | 429 | 2.215 | 89.78 | 0.076 | 0.3289 |
-| ivf n512 p16 | 0.9231 | 520 | 2.215 | 89.78 | 0.131 | 0.3436 |
-| ivf n512 p32 | 0.9619 | 595 | 2.215 | 89.78 | 0.253 | 0.3567 |
-| ivf n512 p64 | 0.9850 | 631 | 2.215 | 89.78 | 0.484 | 0.3625 |
-| ivf n1024 p8 | 0.8250 | 373 | 4.238 | 90.57 | 0.059 | 0.3217 |
-| ivf n1024 p16 | 0.9000 | 489 | 4.238 | 90.57 | 0.094 | 0.3367 |
-| ivf n1024 p32 | 0.9472 | 570 | 4.238 | 90.57 | 0.151 | 0.3510 |
-| ivf n1024 p64 | 0.9739 | 612 | 4.238 | 90.57 | 0.276 | 0.3569 |
+| flat | 1.0000 | 648 | 0.087 | 88.53 | 2.740 | 0.3687 |
+| hnsw efS16 | 0.9380 | 557 | 3.207 | 104.22 | 0.078 | 0.3499 |
+| hnsw efS32 | 0.9795 | 624 | 3.207 | 104.22 | 0.120 | 0.3614 |
+| hnsw efS64 | 0.9949 | 643 | 3.207 | 104.22 | 0.192 | 0.3649 |
+| hnsw efS128 | 0.9989 | 647 | 3.207 | 104.22 | 0.344 | 0.3671 |
+| ivf n256 p8 | 0.8906 | 477 | 1.303 | 89.39 | 0.144 | 0.3358 |
+| ivf n256 p16 | 0.9468 | 561 | 1.303 | 89.39 | 0.272 | 0.3524 |
+| ivf n256 p32 | 0.9764 | 612 | 1.303 | 89.39 | 0.424 | 0.3596 |
+| ivf n256 p64 | 0.9923 | 642 | 1.303 | 89.39 | 0.932 | 0.3663 |
+| ivf n512 p8 | 0.8611 | 429 | 2.883 | 89.78 | 0.072 | 0.3289 |
+| ivf n512 p16 | 0.9231 | 520 | 2.883 | 89.78 | 0.137 | 0.3436 |
+| ivf n512 p32 | 0.9619 | 595 | 2.883 | 89.78 | 0.264 | 0.3567 |
+| ivf n512 p64 | 0.9850 | 631 | 2.883 | 89.78 | 0.502 | 0.3625 |
+| ivf n1024 p8 | 0.8250 | 373 | 5.335 | 90.57 | 0.080 | 0.3217 |
+| ivf n1024 p16 | 0.9000 | 489 | 5.335 | 90.57 | 0.110 | 0.3367 |
+| ivf n1024 p32 | 0.9472 | 570 | 5.335 | 90.57 | 0.178 | 0.3510 |
+| ivf n1024 p64 | 0.9739 | 612 | 5.335 | 90.57 | 0.335 | 0.3569 |
 
 ![FAISS recall vs latency](assets/figures/faiss_recall_latency.png)
 
@@ -275,10 +275,10 @@ ANN Recall@10 = |ANN top-10 ∩ Flat top-10| / 10 per query, macro-averaged over
 
 ![IVF nprobe sweep](assets/figures/faiss_ivf_nprobe.png)
 
-Recommended FiQA operating points (measured, FiQA-only — not claims of universal optimality):
+Observed FiQA operating points for this embedding model, this machine, and this tested grid (not claims of universal optimality):
 
-- **HNSW efSearch = 64** is the best speed/recall tradeoff: 0.9941 ANN Recall@10 (643/648 queries ≥ 0.9) at 0.156 ms mean index-search latency — about 12.8× faster than Flat's 1.997 ms for a 0.006 recall loss; qrel nDCG@10 moves only from 0.3687 to 0.3642. efSearch = 128 raises recall to 0.9983 at 0.284 ms when recall is prioritized. HNSW provides the strongest high-recall tradeoff in the tested grid: around ANN Recall@10 ≈ 0.99, HNSW efSearch=64 is substantially faster than the IVF configurations reaching comparable recall (0.156 ms vs 0.484–0.888 ms at nprobe = 64).
-- **IVF nlist = 512, nprobe = 64** is the best IVF tradeoff: 0.9850 recall at 0.484 ms (about 4.1× faster than Flat). nlist = 1024, nprobe = 64 trades recall down to 0.9739 for 0.276 ms; nlist = 256, nprobe = 64 is the highest-recall IVF point (0.9923) at 0.888 ms. In this grid, larger nlist means finer partitioning (more cells): at a fixed nprobe it searches a smaller fraction of the corpus, which lowered ANN recall at every nprobe (e.g. at nprobe = 64: 0.9923 → 0.9850 → 0.9739 for nlist 256 → 512 → 1024) while also lowering latency.
+- **HNSW efSearch = 64** is the best observed speed/recall tradeoff in this tested grid: 0.9949 ANN Recall@10 (643/648 queries ≥ 0.9) at 0.192 ms mean index-search latency — about 14.2× faster than Flat's 2.740 ms for a 0.0051 recall loss; qrel nDCG@10 moves from 0.3687 to 0.3649. efSearch = 128 raises recall to 0.9989 at 0.344 ms when recall is prioritized. At roughly comparable high recall in this grid, HNSW efSearch=64 is faster than the IVF nprobe=64 configurations (0.192 ms vs 0.502–0.932 ms for the two IVF points nearest 0.99 recall).
+- **IVF nlist = 512, nprobe = 64** is the best observed IVF tradeoff in this tested grid: 0.9850 recall at 0.502 ms (about 5.5× faster than Flat). nlist = 1024, nprobe = 64 trades recall down to 0.9739 for 0.335 ms; nlist = 256, nprobe = 64 is the highest-recall IVF point (0.9923) at 0.932 ms. In this grid, larger nlist means finer partitioning (more cells): at a fixed nprobe it searches a smaller fraction of the corpus, which lowered ANN recall at every nprobe (e.g. at nprobe = 64: 0.9923 → 0.9850 → 0.9739 for nlist 256 → 512 → 1024) while also lowering latency.
 
 The secondary qrel diagnostic shows aggressive ANN settings do move relevance: qrel nDCG@10 ranges from 0.3217 (ivf n1024 p8) to the Flat 0.3687 (which matches the FiQA Dense benchmark exactly), so recall-optimized configurations matter in practice, not only for the approximation metric.
 
@@ -350,7 +350,7 @@ python experiments/reranker_benchmark.py  # reranking quality
 python experiments/quality_latency.py     # quality vs latency, candidate sizes
 python experiments/faiss_index_benchmark.py --dataset fiqa  # FAISS index comparison (Flat/HNSW/IVF)
 python experiments/failure_analysis.py    # per-query failure report (SciFact)
-python experiments/multidataset_summary.py  # cross-dataset table + figures
+python experiments/multidataset_summary.py \
     --benchmarks outputs/scifact_reranker_benchmark.json outputs/fiqa_benchmark.json \
     --ablations outputs/scifact_fusion_ablation.json outputs/fiqa_fusion_ablation.json
 ```
@@ -367,7 +367,8 @@ Use `--max-queries 20` for a fast smoke run. Full runs evaluate all qrels querie
 - FAISS index study: full FiQA (648 queries), k = 10; HNSW M=32 / efConstruction=200; IVF nlist 256/512/1024 x nprobe 8/16/32/64; 3 warmup + 5 timed passes;
 - hybrid `alpha = 0.5` (ablation grid 0.00–1.00 in steps of 0.25);
 - RRF `k = 60`;
-- deterministic tie-breaking everywhere: descending score, then ascending document id;
+- exact retrieval paths use deterministic tie-breaking: descending score, then ascending document id; approximate FAISS indexes do not carry the same global determinism guarantee across builds;
+- exact benchmark reproduction also depends on dependency, dataset, model, FAISS, hardware, and OS/WSL versions; dataset and model identifiers are recorded, but their revisions are not pinned;
 - results saved as pretty-printed JSON under `outputs/`;
 - unit tests are offline and deterministic;
 - benchmark numbers are generated by the scripts, never hard-coded in the docs;
@@ -400,7 +401,7 @@ python -m pytest -q
 
 - two datasets so far — SciFact (primary deep-analysis dataset) and FiQA (cross-dataset robustness validation); other domains remain untested;
 - the dense and reranker models are pretrained general models, not fine-tuned on either dataset;
-- latency is a single-machine CPU/WSL measurement;
+- latency is a single-machine CPU/WSL measurement of the reference implementations, not a production-engine benchmark;
 - candidate-size conclusions may differ with a different model, dataset, or hardware;
 - the FAISS ANN coverage is the FiQA Flat/HNSW/IVF study above — no PQ/OPQ variants, no GPU, and no larger ANN sweep;
 - no trained retriever or reranker;

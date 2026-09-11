@@ -13,6 +13,7 @@ from experiments.benchmark import save_results
 from experiments.latency_benchmark import (
     format_latency_table,
     measure_method,
+    output_path_for,
     run_latency_benchmark,
     summarize_latencies,
     time_query,
@@ -219,6 +220,22 @@ def test_run_latency_benchmark_empty_query_set_raises():
 
     with pytest.raises(ValueError):
         run_latency_benchmark(empty, retriever_factory=fake_factory)
+
+
+def test_full_smoke_and_dataset_output_paths_are_unique():
+    paths = {
+        output_path_for("scifact"),
+        output_path_for("scifact", 20),
+        output_path_for("fiqa"),
+        output_path_for("fiqa", 20),
+    }
+
+    assert paths == {
+        "outputs/scifact_latency.json",
+        "outputs/scifact_latency_smoke20.json",
+        "outputs/fiqa_latency.json",
+        "outputs/fiqa_latency_smoke20.json",
+    }
 
 
 def test_saved_payload_shape(tmp_path):

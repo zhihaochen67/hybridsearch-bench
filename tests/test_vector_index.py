@@ -11,6 +11,7 @@ import pytest
 
 from hybridsearch.retrieval.dense import DenseRetriever, l2_normalize
 from hybridsearch.retrieval.vector_index import (
+    FaissIndexInfo,
     SUPPORTED_INDEX_TYPES,
     ann_recall_at_k,
     build_faiss_index,
@@ -97,13 +98,105 @@ def test_hnsw_recovers_exact_neighbors_on_tiny_corpus():
     assert indices[0].tolist() == flat_reference_ids(query, EMBEDDINGS[:16], 8)
 
 
-def test_hnsw_efSearch_raised_to_top_k():
-    info = build_faiss_index(EMBEDDINGS, "hnsw", {"M": 16, "efSearch": 4})
+def test_hnsw_efSearch_override_is_request_scoped():
+    class RecordingHnsw:
+        efSearch = 4
 
-    _, indices = search_faiss_index(info, EMBEDDINGS[0], 16)
+    class RecordingIndex:
+        def __init__(self):
+            self.hnsw = RecordingHnsw()
+            self.seen_ef_search = []
 
-    assert indices.shape == (1, 16)
-    assert info.index.hnsw.efSearch >= 16
+        def search(self, queries, top_k):
+            self.seen_ef_search.append(self.hnsw.efSearch)
+            return (
+                np.zeros((len(queries), top_k), dtype=np.float32),
+                np.zeros((len(queries), top_k), dtype=np.int64),
+            )
+
+    index = RecordingIndex()
+    info = FaissIndexInfo(
+        index=index,
+        index_type="hnsw",
+        dimension=8,
+        n_vectors=64,
+        params={"M": 16, "efConstruction": 200, "efSearch": 4},
+        requires_training=False,
+        trained=True,
+    )
+
+    _, first_indices = search_faiss_index(info, EMBEDDINGS[0], 16)
+    _, second_indices = search_faiss_index(info, EMBEDDINGS[1], 2)
+
+    assert first_indices.shape == (1, 16)
+    assert second_indices.shape == (1, 2)
+    assert index.seen_ef_search == [16, 4]
+    assert index.hnsw.efSearch == 4
+
+
+def test_hnsw_efSearch_override_is_serialized_across_requests():
+    import threading
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+
+    class RecordingHnsw:
+        efSearch = 4
+
+    class BlockingIndex:
+        def __init__(self):
+            self.hnsw = RecordingHnsw()
+            self.seen_ef_search = []
+
+        def search(self, queries, top_k):
+            self.seen_ef_search.append(self.hnsw.efSearch)
+            if len(self.seen_ef_search) == 1:
+                first_entered.set()
+                release_first.wait(timeout=1.0)
+            else:
+                second_entered.set()
+            return (
+                np.zeros((len(queries), top_k), dtype=np.float32),
+                np.zeros((len(queries), top_k), dtype=np.int64),
+            )
+
+    index = BlockingIndex()
+    info = FaissIndexInfo(
+        index=index,
+        index_type="hnsw",
+        dimension=8,
+        n_vectors=64,
+        params={"M": 16, "efConstruction": 200, "efSearch": 4},
+        requires_training=False,
+        trained=True,
+    )
+    errors = []
+
+    def run_search(query, top_k):
+        try:
+            search_faiss_index(info, query, top_k)
+        except BaseException as error:  # surfaced in the main test thread
+            errors.append(error)
+
+    first = threading.Thread(target=run_search, args=(EMBEDDINGS[0], 16))
+    second = threading.Thread(target=run_search, args=(EMBEDDINGS[1], 2))
+    first.start()
+    assert first_entered.wait(timeout=1.0)
+    second.start()
+
+    # The second request cannot enter FAISS while the first request owns the
+    # temporary efSearch override.
+    assert not second_entered.wait(timeout=0.05)
+    release_first.set()
+    first.join(timeout=1.0)
+    second.join(timeout=1.0)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert index.seen_ef_search == [16, 4]
+    assert index.hnsw.efSearch == 4
 
 
 # --- ivf ---
@@ -369,6 +462,30 @@ def test_dense_retriever_rebuild_index_reuses_embeddings():
     retriever.rebuild_index("flat")
     assert retriever.index_info.index_type == "flat"
 
+    corpus_calls = [call for call in encoder.calls if len(call) == len(CORPUS)]
+    assert corpus_calls == [["alpha", "beta", "gamma", "delta"]]
+
+
+def test_dense_retriever_rebuild_index_updates_params_without_type():
+    encoder = FakeEncoder(VECTORS)
+    retriever = DenseRetriever(
+        CORPUS,
+        encoder=encoder,
+        index_type="hnsw",
+        index_params={"M": 16, "efConstruction": 100, "efSearch": 8},
+    )
+
+    retriever.rebuild_index(
+        index_params={"M": 8, "efConstruction": 80, "efSearch": 12}
+    )
+
+    assert retriever.index_info.index_type == "hnsw"
+    assert retriever.index_info.params == {
+        "M": 8,
+        "efConstruction": 80,
+        "efSearch": 12,
+    }
+    assert retriever.index.hnsw.efSearch == 12
     corpus_calls = [call for call in encoder.calls if len(call) == len(CORPUS)]
     assert corpus_calls == [["alpha", "beta", "gamma", "delta"]]
 

@@ -8,8 +8,10 @@ Two fusion strategies are supported:
 - ``method="rrf"``: reciprocal rank fusion over the two ranked lists
   (see :func:`hybridsearch.retrieval.fusion.reciprocal_rank_fusion`).
 
-The hybrid retriever asks each underlying retriever for ``candidate_k``
-candidates, fuses over the union, and returns the final ``top_k`` documents.
+The hybrid retriever normally asks each underlying retriever for
+``candidate_k`` candidates, fuses over the union, and returns the final
+``top_k`` documents. At a weighted-fusion endpoint, the active retriever is
+asked for exactly ``top_k`` so the result reproduces its standalone ranking.
 The dense corpus is encoded once when the ``DenseRetriever`` is built;
 hybrid search never re-encodes it, it only reuses the existing search APIs.
 """
@@ -44,7 +46,10 @@ class HybridRetriever:
     candidate_k:
         Number of candidates fetched from each retriever before fusion.
         When ``candidate_k < top_k`` the fetch size is raised to ``top_k``
-        so the final ranking is not artificially starved.
+        so the final ranking is not artificially starved. At a weighted
+        endpoint, the active retriever instead receives exactly ``top_k``;
+        the inactive retriever still uses this configured candidate depth
+        for diagnostic scores.
     """
 
     def __init__(
@@ -93,13 +98,20 @@ class HybridRetriever:
         ``sparse_rank=None``). Dense scores are always used as-is —
         negative cosine similarities still rank normally.
 
-        Ties on the fused score are broken deterministically on ascending
-        document id.
+        Away from the weighted-fusion endpoints, ties on the fused score are
+        broken deterministically on ascending document id. At the endpoints,
+        the active retriever's standalone ordering is preserved exactly:
+        ``alpha=1.0`` returns the sparse ranking and ``alpha=0.0`` returns the
+        dense ranking. The active retriever therefore owns tie ordering at an
+        endpoint (the built-in retrievers use score descending, then id
+        ascending). This prevents documents absent from the active list from
+        tying its minimum normalized score and entering the final results.
 
         Behavior notes: an empty/blank query raises ``ValueError`` (like
         ``DenseRetriever``); ``top_k <= 0`` raises ``ValueError``; and when
-        ``candidate_k < top_k`` the per-retriever fetch is raised to
-        ``top_k`` so up to ``top_k`` fused results can still be produced.
+        ``candidate_k < top_k`` the non-endpoint per-retriever fetch is
+        raised to ``top_k`` so up to ``top_k`` fused results can still be
+        produced.
         """
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
@@ -109,8 +121,25 @@ class HybridRetriever:
         top_k = int(top_k)
         fetch_k = max(self.candidate_k, top_k)
 
-        sparse_results = self.sparse_retriever.search(query, top_k=fetch_k)
-        dense_results = self.dense_retriever.search(query, top_k=fetch_k)
+        # Endpoint rankings are the active retriever's standalone top-k,
+        # including for indexes whose approximate top-k is not guaranteed to
+        # be a prefix of a deeper search. The inactive retriever still uses the
+        # configured candidate depth so endpoint diagnostics retain its scores
+        # where available.
+        sparse_fetch_k = (
+            top_k
+            if self.method == "weighted" and self.alpha == 1.0
+            else fetch_k
+        )
+        dense_fetch_k = (
+            top_k
+            if self.method == "weighted" and self.alpha == 0.0
+            else fetch_k
+        )
+        sparse_results = self.sparse_retriever.search(
+            query, top_k=sparse_fetch_k
+        )
+        dense_results = self.dense_retriever.search(query, top_k=dense_fetch_k)
 
         if self.method == "weighted":
             fused = weighted_fusion(
@@ -141,9 +170,14 @@ class HybridRetriever:
             if "text" in result
         }
 
-        ordered = rank_by_score(
-            {doc_id: fused[doc_id]["score"] for doc_id in fused}
-        )
+        if self.method == "weighted" and self.alpha == 1.0:
+            ordered = [result["id"] for result in sparse_results]
+        elif self.method == "weighted" and self.alpha == 0.0:
+            ordered = [result["id"] for result in dense_results]
+        else:
+            ordered = rank_by_score(
+                {doc_id: fused[doc_id]["score"] for doc_id in fused}
+            )
 
         if self.method == "weighted":
             return [

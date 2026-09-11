@@ -124,6 +124,7 @@ class DenseRetriever:
         """
         if index_type is not None:
             self.index_type = validate_index_type(index_type)
+        if index_type is not None or index_params is not None:
             self.index_params = dict(index_params) if index_params else None
         self.index_info = build_faiss_index(
             self.document_embeddings,
@@ -133,7 +134,13 @@ class DenseRetriever:
         self.index = self.index_info.index
 
     def search(self, query: str, top_k: int = 10):
-        """Return the top ``top_k`` documents by descending cosine similarity."""
+        """Return documents by descending score, then ascending document id.
+
+        Flat search has exact cutoff semantics: if a score tie crosses the
+        requested cutoff, all documents in that boundary tie are considered
+        before the id tie-break is applied. Approximate indexes can only apply
+        the ordering contract to the candidate set returned by FAISS.
+        """
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-empty string")
         if top_k <= 0:
@@ -143,9 +150,34 @@ class DenseRetriever:
 
         query_embedding = l2_normalize(self.encode([query]))[0]
 
+        search_k = top_k
+        if self.index_type == "flat" and top_k < len(self.corpus):
+            # Fetch one result past the cutoff so an exact Flat index can
+            # detect a tie that FAISS would otherwise truncate arbitrarily.
+            search_k = top_k + 1
+
         scores, indices = search_faiss_index(
-            self.index_info, query_embedding, top_k
+            self.index_info, query_embedding, search_k
         )
+
+        if (
+            self.index_type == "flat"
+            and search_k > top_k
+            and scores[0][top_k] == scores[0][top_k - 1]
+        ):
+            # IndexFlatIP range search is exact and uses a strict threshold.
+            # Move one float32 step below the kth score to include the whole
+            # boundary tie without repeatedly rerunning larger top-k scans.
+            boundary_score = np.float32(scores[0][top_k - 1])
+            threshold = np.nextafter(
+                boundary_score, np.float32(-np.inf)
+            )
+            _, boundary_scores, boundary_indices = self.index.range_search(
+                np.asarray(query_embedding[None, :], dtype=np.float32),
+                float(threshold),
+            )
+            scores = boundary_scores[None, :]
+            indices = boundary_indices[None, :]
 
         results = [
             {
@@ -157,11 +189,12 @@ class DenseRetriever:
             if int(index) >= 0
         ]
 
-        # FAISS does not guarantee tie ordering, so break ties on document id
-        # to keep results fully deterministic.
+        # Flat has globally complete boundary ties after the expansion above.
+        # For ANN indexes this deterministically orders only FAISS's returned
+        # candidate set; approximate search cannot promise a global tie set.
         results.sort(key=lambda item: (-item["score"], item["id"]))
 
-        return results
+        return results[:top_k]
 
 
 if __name__ == "__main__":

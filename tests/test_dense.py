@@ -148,6 +148,23 @@ def test_ties_broken_by_document_id(retriever):
     assert results[0]["score"] == results[1]["score"] == pytest.approx(1.0)
 
 
+def test_flat_tie_breaking_is_global_across_top_k_boundary():
+    corpus = [
+        {"id": "Z", "text": "doc-z"},
+        {"id": "Y", "text": "doc-y"},
+        {"id": "A", "text": "doc-a"},
+        {"id": "B", "text": "doc-b"},
+        {"id": "C", "text": "doc-c"},
+    ]
+    vectors = {document["text"]: [1.0, 0.0] for document in corpus}
+    vectors["query"] = [1.0, 0.0]
+    retriever = DenseRetriever(corpus, encoder=FakeEncoder(vectors), index_type="flat")
+
+    results = retriever.search("query", top_k=2)
+
+    assert [result["id"] for result in results] == ["A", "B"]
+
+
 def test_result_contains_id_text_score(retriever):
     result = retriever.search("q-y", top_k=1)[0]
 

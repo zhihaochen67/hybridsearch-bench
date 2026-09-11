@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import os
 import tempfile
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -58,6 +59,9 @@ class FaissIndexInfo:
     params: dict
     requires_training: bool
     trained: bool
+    _search_lock: Any = field(
+        default_factory=threading.RLock, repr=False, compare=False
+    )
 
 
 # --- validation ---
@@ -222,8 +226,9 @@ def search_faiss_index(index_info: FaissIndexInfo, query_embeddings, top_k: int)
     ``(n_queries, dimension)``; the caller is responsible for L2
     normalization (the same convention as index construction). ``top_k``
     is clamped to the number of indexed vectors. For HNSW, ``efSearch``
-    is raised to ``top_k`` on search so a larger cutoff never silently
-    returns fewer neighbours.
+    is temporarily raised to ``top_k`` so a larger cutoff never silently
+    returns fewer neighbours; the configured value is restored before the
+    call returns.
     """
     queries = np.asarray(query_embeddings, dtype=np.float32)
     if queries.ndim == 1:
@@ -242,10 +247,20 @@ def search_faiss_index(index_info: FaissIndexInfo, query_embeddings, top_k: int)
 
     index = index_info.index
     if index_info.index_type == "hnsw":
-        index.hnsw.efSearch = max(index.hnsw.efSearch, top_k)
+        # FAISS exposes efSearch as mutable index state rather than a
+        # per-call argument on the supported API. Serialize the temporary
+        # override so concurrent requests cannot observe or restore one
+        # another's value.
+        with index_info._search_lock:
+            configured_ef_search = index.hnsw.efSearch
+            effective_ef_search = max(configured_ef_search, top_k)
+            try:
+                index.hnsw.efSearch = effective_ef_search
+                return index.search(queries, top_k)
+            finally:
+                index.hnsw.efSearch = configured_ef_search
 
-    scores, indices = index.search(queries, top_k)
-    return scores, indices
+    return index.search(queries, top_k)
 
 
 def ann_recall_at_k(ann_ids, flat_ids, k: int) -> float:

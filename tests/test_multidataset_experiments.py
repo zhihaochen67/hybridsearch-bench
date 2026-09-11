@@ -240,6 +240,14 @@ def test_latency_benchmark_supports_fiqa_dataset():
 def test_latency_output_path_is_dataset_scoped():
     assert latency_output_path_for("fiqa") == "outputs/fiqa_latency.json"
     assert latency_output_path_for("scifact") == "outputs/scifact_latency.json"
+    assert (
+        latency_output_path_for("fiqa", 20)
+        == "outputs/fiqa_latency_smoke20.json"
+    )
+    assert (
+        latency_output_path_for("scifact", 20)
+        == "outputs/scifact_latency_smoke20.json"
+    )
 
 
 def test_latency_cli_accepts_fiqa():
@@ -342,6 +350,7 @@ def test_fiqa_output_filenames_never_collide_with_scifact():
         fusion_output_path_for(None, "scifact"),
         fusion_output_path_for(20, "scifact"),
         latency_output_path_for("scifact"),
+        latency_output_path_for("scifact", 20),
         reranker_output_path_for(None, "scifact"),
         reranker_output_path_for(20, "scifact"),
         quality_output_path_for(None, "scifact"),
@@ -353,14 +362,15 @@ def test_fiqa_output_filenames_never_collide_with_scifact():
         fusion_output_path_for(None, "fiqa"),
         fusion_output_path_for(20, "fiqa"),
         latency_output_path_for("fiqa"),
+        latency_output_path_for("fiqa", 20),
         reranker_output_path_for(None, "fiqa"),
         reranker_output_path_for(20, "fiqa"),
         quality_output_path_for(None, "fiqa"),
         quality_output_path_for(20, "fiqa"),
     }
 
-    assert len(scifact_paths) == 9
-    assert len(fiqa_paths) == 9
+    assert len(scifact_paths) == 10
+    assert len(fiqa_paths) == 10
     assert not (scifact_paths & fiqa_paths)
 
 

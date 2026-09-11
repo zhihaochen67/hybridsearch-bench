@@ -24,10 +24,13 @@ Quality metrics come from the final reranked ids; query-time latency is
 the wall time of the complete per-query call (hybrid candidate retrieval +
 cross-encoder scoring + final top-k) measured with ``time.perf_counter()``.
 Everything expensive is built exactly once per run — BM25 index, dense
-corpus embeddings, FAISS index, the Hybrid Weighted retriever, and the
-cross-encoder — and reused for every query and every candidate size.
+corpus embeddings, FAISS index, the Hybrid Weighted fusion pipeline, and
+the cross-encoder — and reused for every query and every candidate size.
 Warmup queries run untimed per method; one timed pass per method is
-recorded (samples = number of queries).
+recorded (samples = number of queries). With zero warmup queries, lazy
+cross-encoder model loading is part of the first timed query of the first
+reranker method; the result metadata records that timing boundary
+explicitly.
 
 Smoke/subset runs save to
 ``outputs/<dataset>_quality_latency_smokeN.json``; the full run saves to
@@ -58,9 +61,59 @@ from hybridsearch.evaluation.metrics import evaluate_query, mean_metrics
 from hybridsearch.ranking.reranker import CrossEncoderReranker
 from hybridsearch.retrieval.bm25 import BM25
 from hybridsearch.retrieval.dense import DenseRetriever
-from hybridsearch.retrieval.hybrid import HybridRetriever
+from hybridsearch.retrieval.fusion import rank_by_score, weighted_fusion
 
 CANDIDATE_SIZES_DEFAULT = [20, 50, 100]
+
+
+def _fixed_pool_weighted_ranking(
+    sparse, dense, query: str, candidate_k: int, alpha: float
+) -> list[dict]:
+    """Return the complete fused union from one fixed per-source pool.
+
+    Unlike ``HybridRetriever.search(query, top_k=N)``, ``N`` is not used
+    as the source fetch depth here. Both retrievers always fetch exactly
+    ``candidate_k`` results, their scores are normalized and fused once,
+    and the entire resulting union is returned. Callers may then take
+    different prefixes without changing either the candidates that were
+    normalized or the normalization itself.
+    """
+    sparse_results = sparse.search(query, top_k=candidate_k)
+    dense_results = dense.search(query, top_k=candidate_k)
+    fused = weighted_fusion(
+        {result["id"]: result["score"] for result in sparse_results},
+        {result["id"]: result["score"] for result in dense_results},
+        alpha,
+    )
+    texts = {
+        result["id"]: result["text"]
+        for result in [*sparse_results, *dense_results]
+        if "text" in result
+    }
+    if alpha == 1.0:
+        ordered = [result["id"] for result in sparse_results]
+    elif alpha == 0.0:
+        ordered = [result["id"] for result in dense_results]
+    else:
+        ordered = rank_by_score(
+            {doc_id: components["score"] for doc_id, components in fused.items()}
+        )
+    return [
+        {
+            "id": doc_id,
+            "text": texts.get(doc_id),
+            "score": fused[doc_id]["score"],
+            "bm25_score": fused[doc_id]["sparse_score"],
+            "dense_score": fused[doc_id]["dense_score"],
+            "normalized_bm25_score": fused[doc_id][
+                "normalized_sparse_score"
+            ],
+            "normalized_dense_score": fused[doc_id][
+                "normalized_dense_score"
+            ],
+        }
+        for doc_id in ordered
+    ]
 
 
 def parse_candidate_sizes(text: str | None, k: int) -> list[int]:
@@ -91,30 +144,42 @@ def build_methods(corpus, k: int, candidate_sizes, alpha: float,
     """Build every method once; return {name: query_text -> final top-k ids}.
 
     One BM25 index, one DenseRetriever (one corpus encoding, one FAISS
-    index), one Hybrid Weighted retriever (with the project-standard
+    index), one Hybrid Weighted fusion pipeline (with the project-standard
     candidate pool ``hybrid_candidate_k``), and one cross-encoder are
-    shared by every method. For ``rerank@N`` the hybrid returns its top-N
-    candidates and the reranker scores all N pairs before truncating to
-    the final top-k.
+    shared by every method. Every hybrid call fetches exactly
+    ``hybrid_candidate_k`` results from each source and fuses their full
+    union. For ``rerank@N`` only the top-N prefix of that identical
+    upstream ranking is sent to the reranker before truncating to the
+    final top-k.
     """
+    if not isinstance(hybrid_candidate_k, int) or hybrid_candidate_k <= 0:
+        raise ValueError(
+            "hybrid_candidate_k must be a positive integer, got "
+            f"{hybrid_candidate_k!r}"
+        )
+    if not isinstance(alpha, (int, float)) or not 0.0 <= alpha <= 1.0:
+        raise ValueError(f"alpha must be between 0.0 and 1.0, got {alpha!r}")
+
     sparse = BM25(corpus)
     dense = DenseRetriever(corpus, model_name=dense_model)
-    hybrid = HybridRetriever(
-        sparse, dense, method="weighted", alpha=alpha, candidate_k=hybrid_candidate_k
-    )
     reranker = CrossEncoderReranker(model_name=reranker_model)
+
+    def upstream_ranking(query: str) -> list[dict]:
+        return _fixed_pool_weighted_ranking(
+            sparse, dense, query, hybrid_candidate_k, alpha
+        )
 
     methods = {
         "BM25": lambda q: [r["id"] for r in sparse.search(q, top_k=k)],
         "Dense": lambda q: [r["id"] for r in dense.search(q, top_k=k)],
-        "Hybrid Weighted": lambda q: [r["id"] for r in hybrid.search(q, top_k=k)],
+        "Hybrid Weighted": lambda q: [r["id"] for r in upstream_ranking(q)[:k]],
     }
     for size in candidate_sizes:
         def make(size: int):
             return lambda q: [
                 r["id"]
                 for r in reranker.rerank(
-                    q, hybrid.search(q, top_k=size), top_k=k
+                    q, upstream_ranking(q)[:size], top_k=k
                 )
             ]
 
@@ -191,6 +256,20 @@ def run_quality_latency(
         for name, search_fn in methods.items()
     }
 
+    model_loading_excluded = warmup_queries > 0
+    if model_loading_excluded:
+        construction_boundary = (
+            "dataset loading, index construction, dense corpus encoding, "
+            "FAISS build, and model loading are excluded"
+        )
+    else:
+        construction_boundary = (
+            "dataset loading, index construction, dense corpus encoding, "
+            "and FAISS build are excluded; with zero warmup queries, lazy "
+            "cross-encoder model loading is included in the first timed query "
+            "of the first reranker method"
+        )
+
     return {
         "metadata": {
             "dataset": dataset.name,
@@ -206,12 +285,15 @@ def run_quality_latency(
             "warmup_queries": warmup_queries,
             "timer": getattr(timer, "__name__", type(timer).__name__),
             "timing_passes": 1,
+            "model_loading_excluded": model_loading_excluded,
             "methodology": [
                 "one timed pass per method; samples = number of queries",
+                "each reranker size slices the same weighted-fusion ranking; "
+                f"BM25 and dense each fetch exactly {hybrid_candidate_k} "
+                "candidates before one shared normalization configuration",
                 "latency covers the full per-query call: hybrid candidate "
                 "retrieval + cross-encoder scoring + final top-k",
-                "dataset loading, index construction, dense corpus encoding, "
-                "FAISS build, and model loading are excluded",
+                construction_boundary,
             ],
         },
         "results": results,
