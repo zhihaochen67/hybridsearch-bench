@@ -415,7 +415,3 @@ python -m pytest -q
 - pseudo-relevance feedback;
 - a larger-scale benchmark such as MS MARCO;
 - an optional downstream RAG experiment.
-
-## License
-
-MIT — see [LICENSE](LICENSE). This project uses third-party datasets and models (SciFact and FiQA via BEIR, sentence-transformers, FAISS); those assets are acknowledged by name and remain under their respective licenses.
